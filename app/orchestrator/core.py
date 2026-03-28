@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List
-from datetime import date
-import re
 
 from app.intent.router import route_intent
 
@@ -54,69 +52,6 @@ def _forget_by_query(query: str) -> int:
     except Exception:
         return 0
     return removed
-
-
-
-def _normalize_memory_text(text: str) -> str:
-    text = (text or "").strip().lower()
-    repl = {
-        "ą": "a", "ć": "c", "ę": "e", "ł": "l", "ń": "n",
-        "ó": "o", "ś": "s", "ż": "z", "ź": "z",
-    }
-    for a, b in repl.items():
-        text = text.replace(a, b)
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
-    return " ".join(text.split())
-
-
-def _memory_query_variants(query: str) -> List[str]:
-    q = _normalize_memory_text(query)
-    out = {q}
-    for t in [x for x in q.split() if len(x) >= 3]:
-        out.add(t)
-        if len(t) >= 4:
-            out.add(t[:-1])
-        for suf in ("ie", "a", "e", "owi", "om", "ach", "em", "y", "i"):
-            if t.endswith(suf) and len(t) - len(suf) >= 3:
-                out.add(t[:-len(suf)])
-        if t.startswith("mart") or t.startswith("marc"):
-            out.update({"marta", "mart", "marc"})
-    return [x for x in out if x]
-
-
-def _recall_by_query(query: str) -> List[str]:
-    facts = _list_facts()
-    variants = _memory_query_variants(query)
-    found: List[str] = []
-    for fact in facts:
-        nf = _normalize_memory_text(fact)
-        if any(v in nf for v in variants):
-            found.append(fact)
-    return found
-
-
-def _today_task_lines() -> List[str]:
-    try:
-        from app.b2c import tasks as tasks_mod
-        items = tasks_mod.list_tasks_for_date(date.today())
-    except Exception:
-        items = []
-    out: List[str] = []
-    for task in items or []:
-        if not isinstance(task, dict) or bool(task.get("done")):
-            continue
-        title = str(task.get("title") or task.get("text") or "").strip()
-        # prettier display for "bez godziny ..."
-        if title.lower().startswith("bez godziny "):
-            title = title[len("bez godziny "):].strip()
-            title = f"(bez godziny) {title}"
-        due_at = str(task.get("due_at") or "")
-        if due_at and "T" in due_at:
-            hhmm = due_at.split("T", 1)[1][:5]
-            out.append(f"• {hhmm} {title}")
-        else:
-            out.append(f"• {title}")
-    return out
 
 
 def _recall_home() -> str | None:
@@ -172,35 +107,6 @@ def _try_handle_memory(message: str) -> Dict[str, Any] | None:
         if removed:
             return _as_reply("memory_forget", f"✅ Usunięto {removed} wpis(ów).")
         return _as_reply("memory_forget", "Nie znalazłem takiego wpisu w pamięci.")
-
-
-    if low.startswith("co pamiętam o ") or low.startswith("co pamietam o "):
-        query = raw.split(" o ", 1)[1].strip()
-        if not query:
-            return _as_reply("memory_recall", "Podaj, o kim lub o czym mam przypomnieć.")
-        found = _recall_by_query(query)
-        _clear_pending_flows()
-        if found:
-            body = "\n".join(f"• {fact}" for fact in found)
-            return _as_reply("memory_recall", f"Pamiętam o {query}:\n{body}")
-        return _as_reply("memory_recall", f"Nie mam jeszcze nic konkretnego o {query}.")
-
-    if low in {"pamięć dnia", "pamiec dnia", "memory day", "briefing pamięci", "briefing pamieci"}:
-        task_lines = _today_task_lines()
-        facts = _list_facts()
-        _clear_pending_flows()
-        parts = [f"MEMORY BRAIN — {date.today().isoformat()}", "", "Dzisiejsze zadania:"]
-        if task_lines:
-            parts.extend(task_lines)
-        else:
-            parts.append("• brak")
-        parts.append("")
-        if facts:
-            parts.append("Pamięć:")
-            parts.extend(f"• {fact}" for fact in facts)
-        else:
-            parts.append("Pamięć jest jeszcze lekka. Użyj: `zapamiętaj: ...`, `notatki` albo `reminders`.")
-        return _as_reply("memory_day", "\n".join(parts))
 
     if low.startswith("gdzie mieszkam"):
         home = _recall_home()

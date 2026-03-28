@@ -21,14 +21,12 @@ def _fmt_dt(dt: datetime) -> str:
     return dt.strftime("%H:%M")
 
 
-def _display_mode(mode: Optional[str]) -> Optional[str]:
+def _display_mode(mode: Optional[str]) -> str:
     low = (mode or "").strip().lower()
-    mapping = {
+    return {
         "samochod": "samochodem",
         "samochód": "samochodem",
-        "samochodem": "samochodem",
         "driving": "samochodem",
-        "car": "samochodem",
         "autobus": "komunikacją",
         "komunikacja": "komunikacją",
         "komunikacją": "komunikacją",
@@ -36,22 +34,18 @@ def _display_mode(mode: Optional[str]) -> Optional[str]:
         "rower": "rowerem",
         "rowerem": "rowerem",
         "bicycling": "rowerem",
-        "bike": "rowerem",
         "pieszo": "pieszo",
         "walking": "pieszo",
-        "walk": "pieszo",
-    }
-    return mapping.get(low, (mode or "").strip() or None)
+    }.get(low, mode or "")
 
 
 def _maps_mode(mode: Optional[str]) -> str:
     low = (mode or "").strip().lower()
-    mapping = {
+    return {
         "samochod": "driving",
         "samochód": "driving",
         "samochodem": "driving",
         "driving": "driving",
-        "car": "driving",
         "autobus": "transit",
         "komunikacja": "transit",
         "komunikacją": "transit",
@@ -59,16 +53,13 @@ def _maps_mode(mode: Optional[str]) -> str:
         "rower": "bicycling",
         "rowerem": "bicycling",
         "bicycling": "bicycling",
-        "bike": "bicycling",
         "pieszo": "walking",
         "walking": "walking",
-        "walk": "walking",
-    }
-    return mapping.get(low, "driving")
+    }.get(low, "driving")
 
 
 def _task_location_text(t: Dict[str, Any]) -> Optional[str]:
-    for k in ("location", "location_text", "place", "address"):
+    for k in ("location_text", "location", "place", "address"):
         v = t.get(k)
         if isinstance(v, str) and v.strip():
             return v.strip()
@@ -78,18 +69,15 @@ def _task_location_text(t: Dict[str, Any]) -> Optional[str]:
 def _task_start_origin(t: Dict[str, Any], fallback_origin: Optional[str]) -> Optional[str]:
     v = t.get("start_origin")
     if isinstance(v, str) and v.strip():
-        low = v.strip().lower()
-        if low in {"dom", "home", "praca", "work", "tu", "tutaj"} and fallback_origin:
-            return fallback_origin
         return v.strip()
     return fallback_origin
 
 
 def _task_travel_mode(t: Dict[str, Any], fallback_mode: Optional[str]) -> Optional[str]:
-    # Use only dedicated travel_mode; generic "mode" caused false values in plan output.
-    v = t.get("travel_mode")
-    if isinstance(v, str) and v.strip():
-        return v.strip()
+    for k in ("travel_mode", "mode"):
+        v = t.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
     return fallback_mode
 
 
@@ -101,33 +89,15 @@ def _task_title(t: Dict[str, Any]) -> str:
     return f"Zadanie #{t.get('id', '?')}"
 
 
-def _time_str_from_task(t: Dict[str, Any]) -> str:
-    time_str = str(t.get("time") or "").strip()
-    if time_str:
-        return time_str[:5]
-    due_at = str(t.get("due_at") or "")
-    if "T" in due_at:
-        return due_at.split("T", 1)[1][:5]
-    return ""
-
-
-def _sort_key(t: Dict[str, Any]):
-    hhmm = _parse_hhmm(_time_str_from_task(t))
-    return (0, hhmm[0], hhmm[1], int(t.get("id") or 0)) if hhmm else (1, 99, 99, int(t.get("id") or 0))
-
-
-def _checklist_lines(t: Dict[str, Any], max_items: int = 10) -> List[str]:
+def _checklist_lines(t: Dict[str, Any], max_items: int = 5) -> List[str]:
     cl = t.get("checklist")
     if not isinstance(cl, dict):
         return []
+    title = cl.get("title") or "Lista"
     items = cl.get("items") or []
     if not isinstance(items, list) or not items:
         return []
-    lines: List[str] = []
-    cl_title = str(cl.get("title") or "").strip()
-    task_title = _task_title(t).strip().lower()
-    if cl_title and cl_title.lower() != task_title:
-        lines.append(f"      Lista: {cl_title}")
+    lines = [f"      {title}:"]
     shown = 0
     for it in items:
         if shown >= max_items:
@@ -143,57 +113,25 @@ def _checklist_lines(t: Dict[str, Any], max_items: int = 10) -> List[str]:
         mark = "☑" if done else "☐"
         lines.append(f"      {mark} {txt}")
         shown += 1
-    remaining = len(items) - shown
+    remaining = len([i for i in items if i]) - shown
     if remaining > 0:
         lines.append(f"      (+{remaining} więcej)")
     return lines
 
 
-def _compute_trip_fields(
-    task: Dict[str, Any],
-    day_iso: str,
-    origin_addr: Optional[str],
-    transport_mode: Optional[str],
-    buffer_min: int,
-):
-    start_origin = _task_start_origin(task, origin_addr)
-    raw_mode = _task_travel_mode(task, transport_mode)
-    mode_display = _display_mode(raw_mode)
+def _time_str_from_task(t: Dict[str, Any]) -> str:
+    time_str = str(t.get("time") or "").strip()
+    if time_str:
+        return time_str[:5]
+    due_at = str(t.get("due_at") or "")
+    if "T" in due_at:
+        return due_at.split("T", 1)[1][:5]
+    return ""
 
-    saved_leave_at = task.get("leave_at")
-    leave_at = saved_leave_at.strip() if isinstance(saved_leave_at, str) and saved_leave_at.strip() else None
 
-    eta_val = task.get("eta_min")
-    eta_min = int(eta_val) if isinstance(eta_val, int) and eta_val > 0 else None
-
-    if leave_at or eta_min:
-        return start_origin, eta_min, leave_at, mode_display
-
-    time_str = _time_str_from_task(task)
-    loc = _task_location_text(task)
-    if not (time_str and loc and start_origin):
-        return start_origin, None, None, mode_display
-
-    eta_live = None
-    try:
-        eta_live = get_eta_minutes(start_origin, loc, _maps_mode(raw_mode))
-    except Exception:
-        eta_live = None
-
-    if not (isinstance(eta_live, int) and eta_live > 0):
-        return start_origin, None, None, mode_display
-
-    leave_calc = None
-    hhmm = _parse_hhmm(time_str)
-    if hhmm:
-        try:
-            dt_task = datetime.fromisoformat(day_iso + "T00:00:00").replace(hour=hhmm[0], minute=hhmm[1])
-            dt_depart = dt_task - timedelta(minutes=int(eta_live) + int(buffer_min))
-            leave_calc = _fmt_dt(dt_depart)
-        except Exception:
-            leave_calc = None
-
-    return start_origin, int(eta_live), leave_calc, mode_display
+def _sort_key(t: Dict[str, Any]):
+    hhmm = _parse_hhmm(_time_str_from_task(t))
+    return (0, hhmm[0], hhmm[1]) if hhmm else (1, 99, 99)
 
 
 def build_day_plan(
@@ -204,42 +142,68 @@ def build_day_plan(
     buffer_min: int = 10,
 ) -> str:
     header = f"PLAN DNIA — {day_iso}"
-    if not tasks:
-        return header + "\n\nBrak zadań na dziś."
-
-    tasks_sorted = sorted(tasks, key=_sort_key)
     lines: List[str] = [header, ""]
 
-    for task in tasks_sorted:
-        title = _task_title(task)
-        time_str = _time_str_from_task(task)
-        location = _task_location_text(task)
+    tasks_sorted = sorted(tasks or [], key=_sort_key)
 
-        start_origin, eta_min, leave_at, mode_display = _compute_trip_fields(
-            task, day_iso, origin_addr, transport_mode, buffer_min
-        )
+    if not tasks_sorted:
+        return header + "\n\nBrak zadań na dziś."
 
-        if leave_at:
-            lines.append(f"{leave_at}  WYJŚCIE → {title}")
-            lines.append("")
+    for t in tasks_sorted:
+        time_str = _time_str_from_task(t)
+        title = _task_title(t)
+        loc = _task_location_text(t)
 
         headline = f"{time_str}  {title}" if time_str else f"(bez godz.)  {title}"
-        if location:
-            headline += f" — {location}"
+        if loc:
+            headline += f" — {loc}"
         lines.append(headline)
 
-        details: List[str] = []
-        show_trip = bool(location or eta_min or task.get("travel_mode") or task.get("start_origin"))
-        if show_trip and start_origin:
-            details.append(f"Start: {start_origin}")
-        if eta_min:
-            details.append(f"Dojazd: {eta_min} min")
-        if show_trip and mode_display:
-            details.append(f"Tryb: {mode_display}")
-        if details:
-            lines.append("      " + "  •  ".join(details))
+        task_origin = _task_start_origin(t, origin_addr)
+        task_mode_raw = _task_travel_mode(t, transport_mode)
+        task_mode = _display_mode(task_mode_raw)
+        leave_at = (t.get("leave_at") or "").strip() if isinstance(t.get("leave_at"), str) else ""
+        eta_saved = t.get("eta_min")
 
-        lines.extend(_checklist_lines(task))
+        if task_origin:
+            lines.append(f"      Start: {task_origin}")
+
+        # Use saved ETA/leave first (from the add-task travel flow)
+        if leave_at or isinstance(eta_saved, int) or task_mode:
+            details: List[str] = []
+            if leave_at:
+                details.append(f"Wyjazd: {leave_at}")
+            if isinstance(eta_saved, int):
+                details.append(f"Dojazd: {eta_saved} min")
+            if task_mode:
+                details.append(f"Tryb: {task_mode}")
+            if details:
+                lines.append("      " + "  •  ".join(details))
+        # Fallback: live compute if we have enough data but saved fields are absent
+        elif time_str and loc and task_origin:
+            eta = None
+            try:
+                eta = get_eta_minutes(task_origin, loc, _maps_mode(task_mode_raw))
+            except Exception:
+                eta = None
+
+            details: List[str] = []
+            if isinstance(eta, int) and eta > 0:
+                hhmm = _parse_hhmm(time_str)
+                if hhmm:
+                    try:
+                        dt_task = datetime.fromisoformat(day_iso + "T00:00:00").replace(hour=hhmm[0], minute=hhmm[1])
+                        dt_depart = dt_task - timedelta(minutes=int(eta) + int(buffer_min))
+                        details.append(f"Wyjazd: {_fmt_dt(dt_depart)}")
+                    except Exception:
+                        pass
+                details.append(f"Dojazd: {eta} min")
+            if task_mode:
+                details.append(f"Tryb: {task_mode}")
+            if details:
+                lines.append("      " + "  •  ".join(details))
+
+        lines.extend(_checklist_lines(t))
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"

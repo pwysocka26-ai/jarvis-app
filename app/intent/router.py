@@ -34,190 +34,6 @@ PRIORITY_EMOJI = {
 }
 
 
-WEEKDAY_MAP = {
-    "poniedziałek": 0, "poniedzialek": 0,
-    "wtorek": 1,
-    "środa": 2, "sroda": 2, "środę": 2, "srodę": 2,
-    "czwartek": 3,
-    "piątek": 4, "piatek": 4, "piątku": 4, "piatku": 4,
-    "sobota": 5, "sobotę": 5, "sobote": 5,
-    "niedziela": 6, "niedzielę": 6, "niedziele": 6,
-}
-
-
-def _normalize_hhmm_token(tok: str) -> Optional[str]:
-    s = (tok or '').strip()
-    m = re.match(r'^(\d{1,2})(?::(\d{2}))?$', s)
-    if not m:
-        return None
-    hh = int(m.group(1))
-    mm = int(m.group(2) or '00')
-    if not (0 <= hh <= 23 and 0 <= mm <= 59):
-        return None
-    return f"{hh:02d}:{mm:02d}"
-
-
-def _next_weekday_date(name: str) -> Optional[date]:
-    wd = WEEKDAY_MAP.get((name or '').strip().lower())
-    if wd is None:
-        return None
-    today = date.today()
-    delta = (wd - today.weekday()) % 7
-    if delta == 0:
-        delta = 7
-    return today + timedelta(days=delta)
-
-
-def _split_title_and_location(rest: str) -> Tuple[str, Optional[str]]:
-    s = (rest or '').strip().strip(',')
-    if not s:
-        return '', None
-    if ',' in s:
-        title, loc = s.split(',', 1)
-        return title.strip(), loc.strip() or None
-    return s, None
-
-
-def _parse_checklist_items(items_raw: str) -> List[str]:
-    out: List[str] = []
-    for part in re.split(r',|;|\n', items_raw or ''):
-        item = str(part).strip().lstrip('-').strip()
-        if item:
-            out.append(item)
-    return out
-
-
-def _looks_like_new_task_request(message: str) -> bool:
-    msg = (message or '').strip()
-    low = msg.lower()
-    if not msg:
-        return False
-    if low.startswith('dodaj:') or low.startswith('add:'):
-        return True
-    if re.match(r'^za\s+(?:(?:\d+)\s*(?:min|minut(?:y)?|m|h)|(?:1\s*)?godzin(?:ę|e|y|a)?)\s+.+$', low, flags=re.I):
-        return True
-    if re.match(r'^(?:dziś|dzisiaj|jutro)\s+\d{1,2}(?::\d{2})?\s+.+$', msg, flags=re.I):
-        return True
-    if re.match(r'^.+\s+(?:dziś|dzisiaj|jutro)\s+\d{1,2}(?::\d{2})?(?:\s*,\s*.+)?$', msg, flags=re.I):
-        return True
-    if re.match(r'^w\s+(?:poniedzia[łl]ek|wtorek|[śs]rod[ęea]|czwartek|pi[ąa]tek|sobot[ęea]|niedziel[ęea])\s+\d{1,2}(?::\d{2})?\s+.+$', msg, flags=re.I):
-        return True
-    if ':' in msg and len(_parse_checklist_items(msg.rsplit(':', 1)[1])) >= 2:
-        return True
-    return False
-
-
-def _build_add_message(title: str, due_date: date, due_time: str, location: Optional[str] = None) -> str:
-    base = f"dodaj: {due_date.isoformat()} {due_time} {title.strip()}"
-    if location:
-        base += f", {location.strip()}"
-    return base
-
-
-def _create_task_from_nlp(title: str, due_date: date, due_time: str, location: Optional[str] = None, checklist: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    synthetic = _build_add_message(title=title, due_date=due_date, due_time=due_time, location=location)
-    out = tasks_mod.add_task(synthetic)
-    task = out.get('task') if isinstance(out, dict) else None
-    if isinstance(task, dict) and checklist and hasattr(tasks_mod, 'update_task'):
-        try:
-            tasks_mod.update_task(int(task.get('id')), checklist=checklist)
-            task = tasks_mod.get_task(int(task.get('id'))) or task
-            out['task'] = task
-        except Exception:
-            pass
-    return out
-
-
-def _maybe_handle_stable_nlp(message: str) -> Optional[Dict[str, Any]]:
-    msg = (message or '').strip()
-    low = msg.lower()
-
-    # Relative time: 'za 30 minut telefon', 'za godzinę telefon', 'za 2h telefon'
-    m_rel = re.match(r'^za\s+(?:(\d+)\s*(?:min|minut(?:y)?|m)|(?:1\s*)?(godzin(?:ę|e|y|a)?|h)|(?:(\d+)\s*h))\s+(.+)$', low, flags=re.I)
-    if m_rel:
-        mins = None
-        if m_rel.group(1):
-            mins = int(m_rel.group(1))
-        elif m_rel.group(2):
-            mins = 60
-        elif m_rel.group(3):
-            mins = int(m_rel.group(3)) * 60
-        title_part = msg[m_rel.start(4):].strip()
-        if mins and title_part:
-            due_dt = datetime.now() + timedelta(minutes=mins)
-            out = _create_task_from_nlp(title=title_part, due_date=due_dt.date(), due_time=due_dt.strftime('%H:%M'))
-            return _as_reply('add_task', _reply_from_any(out, 'OK'))
-
-    # Checklist task with time / place: 'zrób zakupy o 15:00 w Biedronce przy Narbutta: mleko, chleb'
-    if ':' in msg:
-        head, items_raw = msg.rsplit(':', 1)
-        items = _parse_checklist_items(items_raw)
-        if items:
-            head = head.strip()
-            title = None
-            due_date = date.today()
-            due_time = None
-            location = None
-            patterns = [
-                r'^(?P<title>.+?)\s+(?P<day>dziś|dzisiaj|jutro)\s+o\s+(?P<time>\d{1,2}(?::\d{2})?)\s+w\s+(?P<loc>.+)$',
-                r'^(?P<title>.+?)\s+(?P<day>dziś|dzisiaj|jutro)\s+(?P<time>\d{1,2}(?::\d{2})?)\s+w\s+(?P<loc>.+)$',
-                r'^(?P<title>.+?)\s+o\s+(?P<time>\d{1,2}(?::\d{2})?)\s+w\s+(?P<loc>.+)$',
-                r'^(?P<title>.+?)\s+w\s+(?P<loc>.+?)\s+o\s+(?P<time>\d{1,2}(?::\d{2})?)$',
-                r'^(?P<title>.+?)\s+(?P<day>dziś|dzisiaj|jutro)\s+o\s+(?P<time>\d{1,2}(?::\d{2})?)$',
-                r'^(?P<title>.+?)\s+o\s+(?P<time>\d{1,2}(?::\d{2})?)$',
-            ]
-            for pat in patterns:
-                m = re.match(pat, head, flags=re.I)
-                if not m:
-                    continue
-                title = m.group('title').strip()
-                if m.groupdict().get('day'):
-                    day = m.group('day').lower()
-                    due_date = date.today() + timedelta(days=1) if day == 'jutro' else date.today()
-                due_time = _normalize_hhmm_token(m.group('time'))
-                location = (m.groupdict().get('loc') or '').strip() or None
-                break
-            if title and due_time:
-                title = re.sub(r'^zrobi[ćc]\s+', '', title, flags=re.I).strip()
-                if re.match(r'^(zakupy|zrob\s+zakupy)$', title, flags=re.I):
-                    title = 'zakupy'
-                checklist = {'title': title.capitalize() if title else 'Lista', 'items': [{'text': it, 'done': False} for it in items]}
-                out = _create_task_from_nlp(title=title, due_date=due_date, due_time=due_time, location=location, checklist=checklist)
-                return _as_reply('add_task', _reply_from_any(out, 'OK'))
-
-    # 'jutro 9 dentysta' / 'dziś 18:30 dentysta, adres'
-    m_prefix = re.match(r'^(?P<day>dziś|dzisiaj|jutro)\s+(?P<time>\d{1,2}(?::\d{2})?)\s+(?P<rest>.+)$', msg, flags=re.I)
-    if m_prefix:
-        due_date = date.today() + timedelta(days=1) if m_prefix.group('day').lower() == 'jutro' else date.today()
-        due_time = _normalize_hhmm_token(m_prefix.group('time'))
-        title, location = _split_title_and_location(m_prefix.group('rest'))
-        if title and due_time:
-            out = _create_task_from_nlp(title=title, due_date=due_date, due_time=due_time, location=location)
-            return _as_reply('add_task', _reply_from_any(out, 'OK'))
-
-    # 'dentysta dziś 18:30'
-    m_suffix = re.match(r'^(?P<rest>.+?)\s+(?P<day>dziś|dzisiaj|jutro)\s+(?P<time>\d{1,2}(?::\d{2})?)$', msg, flags=re.I)
-    if m_suffix:
-        due_date = date.today() + timedelta(days=1) if m_suffix.group('day').lower() == 'jutro' else date.today()
-        due_time = _normalize_hhmm_token(m_suffix.group('time'))
-        title, location = _split_title_and_location(m_suffix.group('rest'))
-        if title and due_time:
-            out = _create_task_from_nlp(title=title, due_date=due_date, due_time=due_time, location=location)
-            return _as_reply('add_task', _reply_from_any(out, 'OK'))
-
-    # 'w środę 14 demo'
-    m_weekday = re.match(r'^w\s+(?P<weekday>poniedziałek|poniedzialek|wtorek|środę|srodę|środa|sroda|czwartek|piątek|piatek|sobotę|sobote|sobota|niedzielę|niedziele|niedziela)\s+(?P<time>\d{1,2}(?::\d{2})?)\s+(?P<rest>.+)$', msg, flags=re.I)
-    if m_weekday:
-        due_date = _next_weekday_date(m_weekday.group('weekday'))
-        due_time = _normalize_hhmm_token(m_weekday.group('time'))
-        title, location = _split_title_and_location(m_weekday.group('rest'))
-        if due_date and due_time and title:
-            out = _create_task_from_nlp(title=title, due_date=due_date, due_time=due_time, location=location)
-            return _as_reply('add_task', _reply_from_any(out, 'OK'))
-
-    return None
-
-
 def _task_time_str(t: Dict[str, Any]) -> str:
     """Return HH:MM if task has a concrete due time."""
     v = t.get("time")
@@ -356,19 +172,6 @@ def _get_origin_address() -> Optional[str]:
     return _get_place("origin_work")
 
 
-
-
-def _resolve_origin_from_answer(ans: str) -> Tuple[str, Optional[str]]:
-    raw = (ans or "").strip()
-    low = raw.lower()
-    if low in {"dom", "home"}:
-        return ORIGIN_HOME, _get_place("origin_home")
-    if low in {"praca", "work"}:
-        return ORIGIN_WORK, _get_place("origin_work")
-    if low in {"tu", "tutaj", "obecna", "obecna lokalizacja"}:
-        return ORIGIN_CURRENT, _get_place("origin_current") or _get_place("origin_home") or _get_place("origin_work")
-    return ORIGIN_CUSTOM, raw
-
 # -----------------------------
 # Sorting & display helpers
 # -----------------------------
@@ -442,137 +245,6 @@ def _extract_date_and_index(parts: List[str], default_date: date) -> Optional[Tu
     return None
 
 
-WEEKDAY_MAP = {
-    "poniedzialek": 0,
-    "poniedziałek": 0,
-    "wtorek": 1,
-    "sroda": 2,
-    "środa": 2,
-    "srode": 2,
-    "środę": 2,
-    "czwartek": 3,
-    "piatek": 4,
-    "piątek": 4,
-    "sobota": 5,
-    "sobote": 5,
-    "sobotę": 5,
-    "niedziela": 6,
-    "niedziele": 6,
-    "niedzielę": 6,
-}
-
-
-def _next_weekday_date(name: str) -> Optional[date]:
-    target = WEEKDAY_MAP.get((name or "").strip().lower())
-    if target is None:
-        return None
-    today = date.today()
-    delta = (target - today.weekday()) % 7
-    if delta == 0:
-        delta = 7
-    return today + timedelta(days=delta)
-
-
-def _fmt_time(hh: int, mm: int = 0) -> str:
-    return f"{int(hh):02d}:{int(mm):02d}"
-
-
-def _build_nlp_add_command(message: str) -> Optional[str]:
-    """Translate short natural Polish task phrases into stable `dodaj:` commands.
-
-    v11.1 fix: allow phrases starting with today words (e.g. `dziś 18:30 dentysta, adres`)
-    and keep the full tail, including address text after commas.
-    """
-    raw = (message or "").strip()
-    if not raw:
-        return None
-
-    low = raw.lower().strip()
-    blocked_prefixes = (
-        "/", "dodaj", "lista", "usun", "usuń", "priorytet", "sort", "ustaw",
-        "tu jestem", "start:", "rano", "diag", "help", "pamiec", "pamięć",
-        "pokaz", "pokaż", "co pamietasz", "co pamiętasz", "zapamietaj",
-        "zapamiętaj", "zapomnij", "gdzie ", "plan dnia",
-        "pomys", "notatk", "reminders", "inbox", "eta",
-        "czy zdaz", "czy zdąż", "przenies", "przenieś", "edytuj", "wyczysc", "wyczyść",
-        "ułóż dzień", "uloz dzien", "przeplanuj", "ile mam wolnego czasu", "reset",
-    )
-    # Do not block natural task phrases that start with "dziś/dzisiaj".
-    # Exact commands like "dziś" are still handled later by the router.
-    if low in YES or low in NO or low.startswith(blocked_prefixes) or low in {"dziś", "dzis", "dzisiaj", "co dziś", "co dzis"}:
-        return None
-
-    m = re.match(r"^za\s+(\d+)\s*(h|godz|godzin(?:e|ę|y)?|m|min|mins|minut(?:e|ę|y)?)\s+(.+)$", low, flags=re.I)
-    if m:
-        amount = int(m.group(1))
-        unit = m.group(2)
-        title = raw[m.start(3):].strip(' ,')
-        now = datetime.now().replace(second=0, microsecond=0)
-        if unit.startswith('h') or unit.startswith('godz') or 'godzin' in unit:
-            target = now + timedelta(hours=amount)
-        else:
-            target = now + timedelta(minutes=amount)
-        return f"dodaj: {target.date().isoformat()} {_fmt_time(target.hour, target.minute)} {title}"
-
-    m = re.match(r"^za\s+godzin(?:e|ę)?\s+(.+)$", low, flags=re.I)
-    if m:
-        title = raw[m.start(1):].strip(' ,')
-        target = datetime.now().replace(second=0, microsecond=0) + timedelta(hours=1)
-        return f"dodaj: {target.date().isoformat()} {_fmt_time(target.hour, target.minute)} {title}"
-
-    m = re.match(r"^(?:w\s+)?(poniedziałek|poniedzialek|wtorek|środa|sroda|środę|srode|czwartek|piątek|piatek|sobota|sobotę|sobote|niedziela|niedzielę|niedziele)(?:\s+o)?\s+(\d{1,2})(?::(\d{2}))?\s+(.+)$", raw, flags=re.I)
-    if m:
-        target_date = _next_weekday_date(m.group(1))
-        if target_date:
-            hh = int(m.group(2))
-            mm = int(m.group(3) or 0)
-            title = m.group(4).strip(' ,')
-            return f"dodaj: {target_date.isoformat()} {_fmt_time(hh, mm)} {title}"
-
-    m = re.match(r"^(?:w\s+)?(poniedziałek|poniedzialek|wtorek|środa|sroda|środę|srode|czwartek|piątek|piatek|sobota|sobotę|sobote|niedziela|niedzielę|niedziele)\s+(.+)$", raw, flags=re.I)
-    if m:
-        target_date = _next_weekday_date(m.group(1))
-        if target_date:
-            title = m.group(2).strip(' ,')
-            return f"dodaj: {target_date.isoformat()} {title}"
-
-    m = re.match(r"^(dziś|dzis|jutro)(?:\s+o)?\s+(\d{1,2})(?::(\d{2}))?\s+(.+)$", raw, flags=re.I)
-    if m:
-        day_word = m.group(1).lower()
-        hh = int(m.group(2))
-        mm = int(m.group(3) or 0)
-        title = m.group(4).strip(' ,')
-        return f"dodaj: {day_word} {_fmt_time(hh, mm)} {title}"
-
-    m = re.match(r"^(.+?)\s+(dziś|dzis|jutro)(?:\s+o)?\s+(\d{1,2})(?::(\d{2}))?$", raw, flags=re.I)
-    if m:
-        title = m.group(1).strip(' ,')
-        day_word = m.group(2).lower()
-        hh = int(m.group(3))
-        mm = int(m.group(4) or 0)
-        return f"dodaj: {day_word} {_fmt_time(hh, mm)} {title}"
-
-    m = re.match(r"^(\d{1,2})(?::(\d{2}))?\s+(.+)$", raw, flags=re.I)
-    if m:
-        hh = int(m.group(1))
-        mm = int(m.group(2) or 0)
-        title = m.group(3).strip(' ,')
-        if 0 <= hh <= 23 and 0 <= mm <= 59 and len(title) >= 2:
-            return f"dodaj: dziś {_fmt_time(hh, mm)} {title}"
-
-    return None
-
-
-def _priority_emoji(priority: Any, explicit: bool = True) -> str:
-    try:
-        pr = int(priority)
-    except Exception:
-        return ""
-    if pr == 2 and not explicit:
-        return ""
-    return PRIORITY_EMOJI.get(pr, f"p{pr} ") if pr in PRIORITY_EMOJI else (f"p{pr} " if pr else "")
-
-
 
 def _normalize_travel_mode(s: str) -> Optional[str]:
     t = (s or "").strip().lower()
@@ -608,393 +280,8 @@ def _google_mode_from_task(travel_mode: str) -> Optional[str]:
     return None
 
 
-def _display_mode_label(travel_mode: str) -> str:
-    tm = _normalize_travel_mode(travel_mode) or "samochod"
-    return {"samochod": "samochodem", "autobus": "komunikacją", "rower": "rowerem", "pieszo": "pieszo"}.get(tm, "samochodem")
-
-
-def _task_title(task: Dict[str, Any]) -> str:
-    return _clean_title_for_display(str(task.get("title") or task.get("text") or "(bez tytułu)")).strip()
-
-
-def _task_location(task: Dict[str, Any]) -> str:
-    return str(task.get("location") or task.get("place") or "").strip()
-
-
-def _task_priority(task: Dict[str, Any]) -> int:
-    try:
-        return int(task.get("priority") or 2)
-    except Exception:
-        return 2
-
-
-def _task_due_minutes(task: Dict[str, Any]) -> Optional[int]:
-    return _parse_time_to_minutes(_task_time_str(task))
-
-
-def _brain_eta_for_task(task: Dict[str, Any], origin: Optional[str]) -> Tuple[Optional[int], Optional[str]]:
-    location = _task_location(task)
-    if not (origin and location):
-        return None, None
-    raw_mode = str(task.get("travel_mode") or _get_place("travel_mode_default") or "samochod")
-    gm = _google_mode_from_task(raw_mode)
-    minutes = None
-    if gm:
-        try:
-            minutes = get_eta_minutes(origin=origin, destination=location, mode=gm)
-        except Exception:
-            minutes = None
-    if not (isinstance(minutes, int) and minutes > 0):
-        minutes = _mvp_eta_minutes(raw_mode)
-    return int(minutes), _display_mode_label(raw_mode)
-
-
-def _brain_rank_key(task: Dict[str, Any]) -> Tuple[int, int, int, str]:
-    pr = _task_priority(task)
-    due_min = _task_due_minutes(task)
-    has_time = 0 if due_min is not None else 1
-    return (pr, has_time, due_min if due_min is not None else 9999, str(task.get("created_at") or ""))
-
-
-def _brain_today_tasks() -> List[Dict[str, Any]]:
-    tasks = _sort_for_list(tasks_mod.list_tasks_for_date(date.today()) or [])
-    return [t for t in tasks if isinstance(t, dict) and not bool(t.get("done"))]
-
-
-def _brain_choose_next(tasks: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not tasks:
-        return None
-    now = datetime.now()
-    now_min = now.hour * 60 + now.minute
-    overdue_timed = [t for t in tasks if _task_due_minutes(t) is not None and (_task_due_minutes(t) or 0) < now_min]
-    if overdue_timed:
-        return sorted(overdue_timed, key=lambda t: ((_task_due_minutes(t) or 0), _task_priority(t)))[0]
-    upcoming_timed = [t for t in tasks if _task_due_minutes(t) is not None and (_task_due_minutes(t) or 0) >= now_min]
-    if upcoming_timed:
-        return sorted(upcoming_timed, key=lambda t: ((_task_due_minutes(t) or 9999), _task_priority(t)))[0]
-    return sorted(tasks, key=_brain_rank_key)[0]
-
-
-def _brain_now_reply(tasks: List[Dict[str, Any]]) -> str:
-    if not tasks:
-        return "Na dziś nie masz żadnych otwartych zadań. Możesz dodać coś nowego albo zajrzeć do pomysłów."
-    chosen = _brain_choose_next(tasks)
-    if not chosen:
-        return "Na dziś nie widzę nic pilnego."
-    title = _task_title(chosen)
-    location = _task_location(chosen)
-    due_min = _task_due_minutes(chosen)
-    pr = _task_priority(chosen)
-    pr_txt = f"p{pr}" if pr else "p2"
-    now = datetime.now()
-    now_min = now.hour * 60 + now.minute
-    origin = _get_origin_address()
-    if due_min is not None:
-        when = f"{due_min // 60:02d}:{due_min % 60:02d}"
-        if location and origin:
-            eta_min, mode_label = _brain_eta_for_task(chosen, origin)
-            if eta_min is not None:
-                leave_min = due_min - eta_min - TRAVEL_BUFFER_MIN
-                if now_min >= leave_min:
-                    return (
-                        f"Teraz zrób to: **wyjdź na {title}**.\n"
-                        f"Godzina: **{when}**\n"
-                        f"Trasa: {origin} → {location}\n"
-                        f"ETA: około **{eta_min} min** ({mode_label})\n"
-                        f"Bufor: {TRAVEL_BUFFER_MIN} min."
-                    )
-                mins_left = leave_min - now_min
-                return (
-                    f"Teraz najlepiej przygotuj się do: **{title}**.\n"
-                    f"Start: **{when}**\n"
-                    f"Wyjście za około **{mins_left} min**.\n"
-                    f"Trasa: {origin} → {location}\n"
-                    f"ETA: około **{eta_min} min** ({mode_label})."
-                )
-        if due_min - now_min <= 30:
-            return f"Teraz najlepiej zajmij się: **{title}**. Zaczyna się o **{when}**."
-        return f"Teraz najbliższe zadanie to: **{title}** o **{when}** ({pr_txt})."
-    top_timed = [t for t in tasks if _task_due_minutes(t) is not None]
-    nearest_timed_gap = ((_task_due_minutes(top_timed[0]) or 9999) - now_min) if top_timed else 9999
-    if pr == 1 and nearest_timed_gap > 45:
-        return f"Teraz zrób: **{title}**. To Twoje najwyższe priorytetowo zadanie na dziś ({pr_txt})."
-    return f"Teraz dobry moment na: **{title}** ({pr_txt})."
-
-
-def _brain_next_reply(tasks: List[Dict[str, Any]]) -> str:
-    chosen = _brain_choose_next(tasks)
-    if not chosen:
-        return "Na dziś nie masz już żadnych zadań."
-    title = _task_title(chosen)
-    location = _task_location(chosen)
-    due_min = _task_due_minutes(chosen)
-    pr = _task_priority(chosen)
-    pr_txt = f"p{pr}" if pr else "p2"
-    if due_min is not None:
-        when = f"{due_min // 60:02d}:{due_min % 60:02d}"
-        tail = f" — {location}" if location else ""
-        return f"Następne zadanie: **{when} {title}**{tail} ({pr_txt})."
-    return f"Następne zadanie bez godziny: **{title}** ({pr_txt})."
-
-
-def _brain_top_reply(tasks: List[Dict[str, Any]]) -> str:
-    if not tasks:
-        return "Na dziś nie masz jeszcze żadnych zadań."
-    ranked = sorted(tasks, key=_brain_rank_key)[:3]
-    lines = ["**Najważniejsze dziś:**"]
-    for idx, task in enumerate(ranked, start=1):
-        title = _task_title(task)
-        pr = _task_priority(task)
-        due_min = _task_due_minutes(task)
-        when = f"{due_min // 60:02d}:{due_min % 60:02d} — " if due_min is not None else ""
-        loc = _task_location(task)
-        tail = f" — {loc}" if loc else ""
-        lines.append(f"{idx}. {when}{title}{tail} (p{pr})")
-    return "\n".join(lines)
-
-
 def route_intent(message: str, persona: str = "b2c", mode: Optional[str] = None, **kwargs) -> Dict[str, Any]:
     low = (message or "").strip().lower()
-
-    try:
-        from app.b2c.v34_brain import maybe_handle_event_nlp
-        event_out = maybe_handle_event_nlp(message)
-        if event_out:
-            return _as_reply(str(event_out.get("intent") or "event_add"), str(event_out.get("reply") or "OK"))
-    except Exception:
-        pass
-
-    try:
-        from app.b2c.v30_brain import maybe_handle_conversational
-        conv = maybe_handle_conversational(message, tasks_mod)
-        if conv:
-            cmd = conv.get("command")
-            if cmd == "centrum dowodzenia":
-                try:
-                    from app.b2c.v29_brain import command_center
-                    return _as_reply("v30_command_center", command_center(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", buffer_min=TRAVEL_BUFFER_MIN))
-                except Exception:
-                    return _as_reply("v30_command_center", "Nie mogę teraz otworzyć centrum dowodzenia.")
-            return _as_reply(str(conv.get("intent") or "conversational"), str(conv.get("reply") or "OK"))
-    except Exception:
-        pass
-
-
-    if low in {"wyczyść wszystko", "wyczysc wszystko", "reset wszystko", "reset all", "/reset_all"}:
-        try:
-            from app.b2c import inbox as inbox_mod
-            for path in [tasks_mod.TASKS_FILE, inbox_mod.INBOX_FILE, inbox_mod.IDEAS_FILE, inbox_mod.NOTES_FILE, inbox_mod.REMINDERS_FILE]:
-                try:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text("[]", encoding="utf-8")
-                except Exception:
-                    pass
-            for fn_name in ("clear_pending_travel", "clear_pending_reminder", "clear_pending_checklist", "clear_pending_clear"):
-                try:
-                    fn = getattr(tasks_mod, fn_name, None)
-                    if fn:
-                        fn()
-                except Exception:
-                    pass
-            return _as_reply("reset_all", "🧹 Wyczyściłam dane testowe Jarvisa.\nTasks: 0\nIdeas: 0\nNotes: 0\nReminders: 0\nInbox: 0\n\n(Zachowałam ustawienia: dom / praca / tryb).")
-        except Exception:
-            return _as_reply("reset_all", "Nie udało się wyczyścić wszystkich danych.")
-
-    if low in {
-        "co powinienem zrobić teraz", "co powinienem zrobic teraz",
-        "co mam zrobić teraz", "co mam zrobic teraz",
-        "co teraz", "co robić teraz", "co robic teraz"
-    }:
-        return _as_reply("brain_now", _brain_now_reply(_brain_today_tasks()))
-
-    if low in {"następne zadanie", "nastepne zadanie", "co dalej", "następny krok", "nastepny krok"}:
-        return _as_reply("brain_next", _brain_next_reply(_brain_today_tasks()))
-
-    if low in {
-        "co jest dziś najważniejsze", "co jest dzis najwazniejsze",
-        "najważniejsze dziś", "najwazniejsze dzis",
-        "priorytety dnia"
-    }:
-        return _as_reply("brain_top", _brain_top_reply(_brain_today_tasks()))
-
-    if low in {"czy zdążę na wszystkie zadania", "czy zdaze na wszystkie zadania", "czy zdążę na wszystko", "czy zdaze na wszystko"}:
-        try:
-            from app.b2c.context_ai import assess_all_today_schedule
-            return _as_reply("context_all_fit", assess_all_today_schedule(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("context_all_fit", "Nie mogę teraz sprawdzić całego planu dnia.")
-
-    if low in {"co mogę zrobić w wolnym czasie", "co moge zrobic w wolnym czasie", "co w wolnym czasie", "wolny czas co robić", "wolny czas co robic"}:
-        try:
-            from app.b2c.context_ai import suggest_for_free_time
-            return _as_reply("context_free_time", suggest_for_free_time(tasks_mod))
-        except Exception:
-            return _as_reply("context_free_time", "Nie mogę teraz podpowiedzieć co zrobić w wolnym czasie.")
-
-    if low in {"przełóż mniej ważne zadania", "przeloz mniej wazne zadania", "przełóż mniej ważne", "przeloz mniej wazne"}:
-        try:
-            from app.b2c.context_ai import postpone_lower_priority_tasks
-            return _as_reply("context_postpone", postpone_lower_priority_tasks(tasks_mod))
-        except Exception:
-            return _as_reply("context_postpone", "Nie mogę teraz przełożyć mniej ważnych zadań.")
-
-    if low in {"zaplanuj mi dzień automatycznie", "zaplanuj mi dzien automatycznie", "ułóż mi dzień automatycznie", "uloz mi dzien automatycznie", "autoplan dnia"}:
-        try:
-            from app.b2c.context_ai import auto_plan_day
-            return _as_reply("context_autoplan", auto_plan_day(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("context_autoplan", "Nie mogę teraz automatycznie zaplanować dnia.")
-
-    if low in {"zaplanuj cały mój dzień", "zaplanuj caly moj dzien", "zaplanuj cały dzień", "zaplanuj caly dzien"}:
-        try:
-            from app.b2c.context_ai import plan_whole_day
-            return _as_reply("context_plan_whole_day", plan_whole_day(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("context_plan_whole_day", "Nie mogę teraz zaplanować całego dnia.")
-
-    m_now_window = re.match(r'^co mog[eę]\s+zrobi[cć]\s+teraz\s+w\s+(\d{1,3})\s+min(?:ut(?:y)?)?$', low)
-    if m_now_window:
-        try:
-            from app.b2c.context_ai import suggest_now_with_limit
-            minutes = int(m_now_window.group(1))
-            return _as_reply("context_now_window", suggest_now_with_limit(tasks_mod, minutes))
-        except Exception:
-            return _as_reply("context_now_window", "Nie mogę teraz podpowiedzieć co zmieści się w tym oknie.")
-
-    if low in {"zoptymalizuj plan dnia", "optymalizuj plan dnia", "ulepsz plan dnia"}:
-        try:
-            from app.b2c.context_ai import optimize_day_plan
-            return _as_reply("context_optimize_day", optimize_day_plan(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("context_optimize_day", "Nie mogę teraz zoptymalizować planu dnia.")
-
-    if low in {"przygotuj mnie do następnego zadania", "przygotuj mnie do nastepnego zadania", "przygotuj do następnego zadania", "przygotuj do nastepnego zadania"}:
-        try:
-            from app.b2c.context_ai import prepare_for_next_task
-            return _as_reply("context_prepare_next", prepare_for_next_task(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("context_prepare_next", "Nie mogę teraz przygotować Cię do następnego zadania.")
-
-
-    if low in {"jaki jest mój następny krok", "jaki jest moj nastepny krok", "mój następny krok", "moj nastepny krok", "co dalej dziś", "co dalej dzis"}:
-        try:
-            from app.b2c.context_ai import daily_next_step
-            return _as_reply("daily_next_step", daily_next_step(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("daily_next_step", "Nie mogę teraz wskazać następnego kroku.")
-
-    if low in {"przygotuj mój dzień", "przygotuj moj dzien", "przygotuj dzien", "rozpocznij dzień", "rozpocznij dzien"}:
-        try:
-            from app.b2c.context_ai import prepare_my_day
-            return _as_reply("daily_prepare_day", prepare_my_day(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("daily_prepare_day", "Nie mogę teraz przygotować Twojego dnia.")
-
-    if low in {"co mogę zrobić w tym oknie czasu", "co moge zrobic w tym oknie czasu", "co mogę zrobić w tym oknie", "co moge zrobic w tym oknie", "co zmieści się w tym oknie", "co zmiesci sie w tym oknie"}:
-        try:
-            from app.b2c.context_ai import suggest_for_current_window
-            return _as_reply("daily_window", suggest_for_current_window(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("daily_window", "Nie mogę teraz ocenić tego okna czasu.")
-    # =============================
-    # INBOX v1
-    # =============================
-    if low.startswith("zapisz:"):
-        from app.b2c import inbox as inbox_mod
-        text = message.split(":", 1)[1].strip()
-        out = inbox_mod.add_inbox(text)
-        return _as_reply("inbox_add", out.get("reply", "OK"))
-
-    if low == "inbox":
-        from app.b2c import inbox as inbox_mod
-        out = inbox_mod.list_inbox()
-        return _as_reply("inbox_list", out.get("reply", "Inbox jest pusty."))
-
-    if low.startswith("usuń z inbox") or low.startswith("usun z inbox"):
-        from app.b2c import inbox as inbox_mod
-        m = re.search(r"(\d+)$", low)
-        if not m:
-            return _as_reply("inbox_delete", "Użyj: `usuń z inbox 1`.")
-        out = inbox_mod.delete_inbox_by_live_number(int(m.group(1)))
-        return _as_reply("inbox_delete", out.get("reply", "OK"))
-
-    if low in {"/reset_inbox", "wyczyść inbox", "wyczysc inbox"}:
-        from app.b2c import inbox as inbox_mod
-        out = inbox_mod.clear_inbox()
-        return _as_reply("inbox_clear", out.get("reply", "OK"))
-
-    m_inbox_to_task = re.match(r"^zamie[nń]\s+inbox\s+(\d+)\s+na\s+zadanie\s+(.+)$", message, flags=re.I)
-    if m_inbox_to_task:
-        from app.b2c import inbox as inbox_mod
-        n = int(m_inbox_to_task.group(1))
-        suffix = m_inbox_to_task.group(2).strip()
-        item = inbox_mod.get_inbox_by_live_number(n)
-        if not item:
-            return _as_reply("inbox_to_task", f"Nie ma wpisu #{n} w Inbox.")
-        synthetic = f"dodaj: {item['text']} {suffix}".strip()
-        out = tasks_mod.add_task(synthetic)
-        if isinstance(out, dict) and out.get("task"):
-            inbox_mod.delete_inbox_by_live_number(n)
-        return _as_reply("inbox_to_task", _reply_from_any(out, default="OK"))
-
-    # ===== INBOX v7 BUCKETS =====
-    if low in {"pomysły", "pomysly", "pomysł", "pomysl"}:
-        from app.b2c import inbox as inbox_mod
-        out = inbox_mod.list_bucket(inbox_mod.IDEAS_FILE, "Pomysły")
-        return _as_reply("ideas_list", out.get("reply", "Pomysły są puste."))
-
-    if low in {"notatki", "notatka"}:
-        from app.b2c import inbox as inbox_mod
-        out = inbox_mod.list_bucket(inbox_mod.NOTES_FILE, "Notatki")
-        return _as_reply("notes_list", out.get("reply", "Notatki są puste."))
-
-    if low in {"reminders", "reminder"}:
-        from app.b2c import inbox as inbox_mod
-        out = inbox_mod.list_bucket(inbox_mod.REMINDERS_FILE, "Reminders")
-        return _as_reply("reminders_list", out.get("reply", "Reminders są puste."))
-
-    m_bucket_clear = re.match(r"^(?:usu[ńn]\s+wszystko\s+z\s+|wyczy[śs]?[ćc]?\s+)(pomys(?:ł|l)(?:y|ów|ow)?|notatk(?:i|ę|e|ek)|reminders?)\s*$", message, flags=re.I)
-    if m_bucket_clear:
-        from app.b2c import inbox as inbox_mod
-        kind_raw = m_bucket_clear.group(1).lower()
-        kind = "idea" if kind_raw.startswith("pomys") else "note" if kind_raw.startswith("notatk") else "reminder"
-        out = inbox_mod.clear_bucket(kind)
-        return _as_reply("bucket_clear", out.get("reply", "OK"))
-
-    m_bucket_move_all = re.match(r"^przenie[śs]\s+wszystko\s+z\s+(pomys(?:ł|l)ów|notatek|reminders?)\s+do\s+zada[ńn](?:\s+(.+))?$", message, flags=re.I)
-    if m_bucket_move_all:
-        from app.b2c import inbox as inbox_mod
-        kind_raw = m_bucket_move_all.group(1).lower()
-        kind = "idea" if kind_raw.startswith("pomys") else "note" if kind_raw.startswith("notat") else "reminder"
-        suffix = (m_bucket_move_all.group(2) or "").strip()
-        out = inbox_mod.move_all_bucket_to_task(kind, suffix)
-        return _as_reply("bucket_to_task_all", out.get("reply", "OK"))
-
-    m_bucket_delete = re.match(r"^usu[ńn]\s+(pomys[łl]|notatk[ęe]|reminder)\s+(\d+)\s*$", message, flags=re.I)
-    if m_bucket_delete:
-        from app.b2c import inbox as inbox_mod
-        kind_raw = m_bucket_delete.group(1).lower()
-        kind = "idea" if kind_raw.startswith("pomys") else "note" if kind_raw.startswith("notatk") else "reminder"
-        out = inbox_mod.delete_bucket_item(kind, int(m_bucket_delete.group(2)))
-        return _as_reply("bucket_delete", out.get("reply", "OK"))
-
-    m_bucket_edit = re.match(r"^edytuj\s+(pomys[łl]|notatk[ęe]|reminder)\s+(\d+)\s+(.+)$", message, flags=re.I)
-    if m_bucket_edit:
-        from app.b2c import inbox as inbox_mod
-        kind_raw = m_bucket_edit.group(1).lower()
-        kind = "idea" if kind_raw.startswith("pomys") else "note" if kind_raw.startswith("notatk") else "reminder"
-        out = inbox_mod.edit_bucket_item(kind, int(m_bucket_edit.group(2)), m_bucket_edit.group(3).strip())
-        return _as_reply("bucket_edit", out.get("reply", "OK"))
-
-    m_bucket_move = re.match(r"^przenie[śs]\s+(pomys[łl]|notatk[ęe]|reminder)\s+(\d+)\s+do\s+zadania(?:\s+(.+))?$", message, flags=re.I)
-    if m_bucket_move:
-        from app.b2c import inbox as inbox_mod
-        kind_raw = m_bucket_move.group(1).lower()
-        kind = "idea" if kind_raw.startswith("pomys") else "note" if kind_raw.startswith("notatk") else "reminder"
-        suffix = (m_bucket_move.group(3) or "").strip()
-        out = inbox_mod.move_bucket_item_to_task(kind, int(m_bucket_move.group(2)), suffix)
-        return _as_reply("bucket_to_task", out.get("reply", "OK"))
-
 
     def _is_command_like(txt: str) -> bool:
         t = (txt or "").strip().lower()
@@ -1012,34 +299,209 @@ def route_intent(message: str, persona: str = "b2c", mode: Optional[str] = None,
             or t.startswith("rano")
             or t.startswith("diag")
             or t.startswith("help")
-            or t.startswith("pamięć")
-            or t.startswith("pamiec")
-            or t.startswith("pokaż pamięć")
-            or t.startswith("pokaz pamiec")
-            or t.startswith("co pamiętasz")
-            or t.startswith("co pamietasz")
-            or t.startswith("zapamiętaj")
-            or t.startswith("zapamietaj")
-            or t.startswith("zapomnij")
-            or t.startswith("gdzie ")
-            or t.startswith("plan dnia")
-            or t.startswith("co mogę zrobić w wolnym czasie")
-            or t.startswith("co moge zrobic w wolnym czasie")
-            or t.startswith("czy zdążę na wszystkie zadania")
-            or t.startswith("czy zdaze na wszystkie zadania")
-            or t.startswith("przełóż mniej ważne zadania")
-            or t.startswith("przeloz mniej wazne zadania")
-            or t.startswith("zaplanuj mi dzień automatycznie")
-            or t.startswith("zaplanuj cały mój dzień")
-            or t.startswith("co mogę zrobić teraz w")
-            or t.startswith("zoptymalizuj plan dnia")
-            or t.startswith("przygotuj mnie do następnego zadania")
-            or t.startswith("zaplanuj mi dzien automatycznie")
-            or t.startswith("co dziś")
-            or t.startswith("co dzis")
-            or t.startswith("dzisiaj")
-            or t.startswith("dziś")
         )
+
+
+    # =============================
+    # CHECKLIST attached to task
+    # =============================
+    def _resolve_task_for_live_number(num: int, d: date | None = None) -> Optional[Dict[str, Any]]:
+        d = d or date.today()
+        tasks_for_day = _sort_for_list(tasks_mod.list_tasks_for_date(d) or [])
+        if 1 <= num <= len(tasks_for_day):
+            return tasks_for_day[num - 1]
+        return None
+
+    # active checklist capture (line-by-line)
+    pending_c = tasks_mod.get_pending_checklist() if hasattr(tasks_mod, "get_pending_checklist") else None
+    if pending_c:
+        task_id = int(pending_c.get("task_id"))
+        if low in {"koniec", "zapisz", "done", "stop"}:
+            title = str((pending_c.get("title") or "Lista")).rstrip(":")
+            if hasattr(tasks_mod, "clear_pending_checklist"):
+                tasks_mod.clear_pending_checklist()
+            return _as_reply("checklist_done", f"✅ Zapisano listę „{title}”.")
+        if (message or "").strip().startswith("-"):
+            txt = (message or "").strip().lstrip("-").strip()
+            if hasattr(tasks_mod, "add_checklist_item_to_task"):
+                t = tasks_mod.add_checklist_item_to_task(task_id, txt)
+                cl = (t or {}).get("checklist") if isinstance(t, dict) else {}
+                items = (cl or {}).get("items") if isinstance(cl, dict) else []
+                idx_item = len(items) if isinstance(items, list) else "?"
+                return _as_reply("checklist_item", f"✅ Dodano: {txt} (#{idx_item}). Wpisz kolejne albo `koniec`.")
+        if (message or "").strip().endswith(":"):
+            title = (message or "").strip().rstrip(":")
+            if hasattr(tasks_mod, "set_checklist_title"):
+                tasks_mod.set_checklist_title(task_id, title)
+            if hasattr(tasks_mod, "set_pending_checklist"):
+                tasks_mod.set_pending_checklist(task_id, title=title)
+            return _as_reply("checklist", "OK — podawaj pozycje listy linia po linii. Na końcu wpisz `koniec`.")
+        # while active, keep guidance instead of falling into other flows
+        return _as_reply("checklist", "Podaj pozycję listy jako `- coś` albo wpisz `koniec`.")
+
+    # start checklist capture for the last task
+    if (message or "").strip().endswith(":") and low not in {"start:", "tryb:"}:
+        last_task = tasks_mod.get_last_task() if hasattr(tasks_mod, "get_last_task") else None
+        if last_task and isinstance(last_task, dict) and last_task.get("id") is not None:
+            title = (message or "").strip().rstrip(":")
+            if hasattr(tasks_mod, "set_checklist_title"):
+                tasks_mod.set_checklist_title(int(last_task["id"]), title)
+            if hasattr(tasks_mod, "set_pending_checklist"):
+                tasks_mod.set_pending_checklist(int(last_task["id"]), title=title)
+            return _as_reply("checklist", "OK — podawaj pozycje listy linia po linii. Na końcu wpisz `koniec`.")
+
+    # pokaż 1
+    m_show = re.search(r"^poka[żz]\s+(\d+)\s*$", low)
+    if m_show:
+        num = int(m_show.group(1))
+        t = _resolve_task_for_live_number(num)
+        if not t:
+            return _as_reply("show_task", f"Nie ma zadania #{num} na dziś.")
+        lines = [f"#{num} {_clean_title_for_display(str(t.get('title') or '(bez tytułu)'))}"]
+        if t.get("location"):
+            lines.append(f"Miejsce: {t.get('location')}")
+        due = str(t.get("due_at") or "")
+        if due:
+            lines.append(f"Kiedy: {due.replace('T',' ')}")
+        cl = t.get("checklist")
+        if isinstance(cl, dict):
+            lines.append(f"{cl.get('title') or 'Lista'}:")
+            items = cl.get("items") or []
+            for idx_i, it in enumerate(items, start=1):
+                txt = it.get("text") if isinstance(it, dict) else str(it)
+                done = bool(it.get("done")) if isinstance(it, dict) else False
+                mark = "☑" if done else "☐"
+                lines.append(f"{num}.{idx_i} {mark} {txt}")
+        return _as_reply("show_task", "\n".join(lines))
+
+    # zrobione 1.2 / odznacz 1.2
+    m_done = re.search(r"^zrobione\s+(\d+)\.(\d+)\s*$", low)
+    if m_done:
+        task_no = int(m_done.group(1)); item_no = int(m_done.group(2))
+        t = _resolve_task_for_live_number(task_no)
+        if not t:
+            return _as_reply("checklist", f"Nie ma zadania #{task_no} na dziś.")
+        ok = tasks_mod.toggle_checklist_item(int(t["id"]), item_no, True) if hasattr(tasks_mod, "toggle_checklist_item") else None
+        return _as_reply("checklist", "✅ Odhaczone." if ok else "Nie udało się odhaczyć pozycji.")
+
+    m_undo = re.search(r"^odznacz\s+(\d+)\.(\d+)\s*$", low)
+    if m_undo:
+        task_no = int(m_undo.group(1)); item_no = int(m_undo.group(2))
+        t = _resolve_task_for_live_number(task_no)
+        if not t:
+            return _as_reply("checklist", f"Nie ma zadania #{task_no} na dziś.")
+        ok = tasks_mod.toggle_checklist_item(int(t["id"]), item_no, False) if hasattr(tasks_mod, "toggle_checklist_item") else None
+        return _as_reply("checklist", "✅ Odznaczone." if ok else "Nie udało się odznaczyć pozycji.")
+
+    m_add_item = re.search(r"^dodaj do\s+(\d+)\s*:\s*(.+)$", low)
+    if m_add_item:
+        task_no = int(m_add_item.group(1)); txt = message.split(":",1)[1].strip()
+        t = _resolve_task_for_live_number(task_no)
+        if not t:
+            return _as_reply("checklist", f"Nie ma zadania #{task_no} na dziś.")
+        ok = tasks_mod.add_checklist_item_manual(int(t["id"]), txt) if hasattr(tasks_mod, "add_checklist_item_manual") else None
+        return _as_reply("checklist", f"✅ Dodano: {txt}" if ok else "Nie udało się dodać pozycji.")
+
+    m_del_item = re.search(r"^(?:usu[ńn]\s+z)\s+(\d+)\s*:\s*(.+)$", low)
+    if m_del_item:
+        task_no = int(m_del_item.group(1)); txt = message.split(":",1)[1].strip()
+        t = _resolve_task_for_live_number(task_no)
+        if not t:
+            return _as_reply("checklist", f"Nie ma zadania #{task_no} na dziś.")
+        ok = tasks_mod.remove_checklist_item_manual(int(t["id"]), txt) if hasattr(tasks_mod, "remove_checklist_item_manual") else None
+        return _as_reply("checklist", f"✅ Usunięto: {txt}" if ok else "Nie udało się usunąć pozycji.")
+
+
+
+    # =============================
+    # CHECKLIST commands (stable, no pending state)
+    # =============================
+    def _resolve_task_for_live_number(num: int, d: date | None = None) -> Optional[Dict[str, Any]]:
+        d = d or date.today()
+        tasks_for_day = _sort_for_list(tasks_mod.list_tasks_for_date(d) or [])
+        if 1 <= num <= len(tasks_for_day):
+            return tasks_for_day[num - 1]
+        return None
+
+    m_add_full = re.search(r"^dodaj do zadania\s+(\d+)\s+([^:]+):\s*(.+)$", low)
+    if m_add_full:
+        task_no = int(m_add_full.group(1))
+        title = message.split(":", 1)[0].split(None, 4)[4].strip()  # preserves original case after task number
+        items_part = message.split(":", 1)[1].strip()
+        t = _resolve_task_for_live_number(task_no)
+        if not t:
+            return _as_reply("checklist", f"Nie ma zadania #{task_no} na dziś.")
+        items = [x.strip() for x in items_part.split(",") if x.strip()]
+        saved = tasks_mod.replace_task_checklist(int(t["id"]), title, items) if hasattr(tasks_mod, "replace_task_checklist") else None
+        if not saved:
+            return _as_reply("checklist", "Nie udało się dodać checklisty.")
+        cl = saved.get("checklist") or {}
+        lines = [f"✅ Dodano checklistę do zadania #{task_no}", "", f"{cl.get('title') or 'Lista'}:"]
+        for idx_i, it in enumerate(cl.get("items") or [], start=1):
+            txt = it.get("text") if isinstance(it, dict) else str(it)
+            lines.append(f"{task_no}.{idx_i} ☐ {txt}")
+        return _as_reply("checklist", "\n".join(lines))
+
+    m_add_short = re.search(r"^dodaj do\s+(\d+)\s*:\s*(.+)$", low)
+    if m_add_short:
+        task_no = int(m_add_short.group(1))
+        txt = message.split(":", 1)[1].strip()
+        t = _resolve_task_for_live_number(task_no)
+        if not t:
+            return _as_reply("checklist", f"Nie ma zadania #{task_no} na dziś.")
+        ok = tasks_mod.add_checklist_item_manual(int(t["id"]), txt) if hasattr(tasks_mod, "add_checklist_item_manual") else None
+        return _as_reply("checklist", f"✅ Dodano: {txt}" if ok else "Nie udało się dodać pozycji.")
+
+    m_show = re.search(r"^poka[żz]\s+(\d+)\s*$", low)
+    if m_show:
+        num = int(m_show.group(1))
+        t = _resolve_task_for_live_number(num)
+        if not t:
+            return _as_reply("show_task", f"Nie ma zadania #{num} na dziś.")
+        lines = [f"#{num} {_clean_title_for_display(str(t.get('title') or '(bez tytułu)'))}"]
+        if t.get("location"):
+            lines.append(f"Miejsce: {t.get('location')}")
+        due = str(t.get("due_at") or "")
+        if due:
+            lines.append(f"Kiedy: {due.replace('T',' ')}")
+        cl = t.get("checklist")
+        if isinstance(cl, dict):
+            lines.append("")
+            lines.append(f"{cl.get('title') or 'Lista'}:")
+            for idx_i, it in enumerate(cl.get("items") or [], start=1):
+                txt = it.get("text") if isinstance(it, dict) else str(it)
+                done = bool(it.get("done")) if isinstance(it, dict) else False
+                mark = "☑" if done else "☐"
+                lines.append(f"{num}.{idx_i} {mark} {txt}")
+        return _as_reply("show_task", "\n".join(lines))
+
+    m_done = re.search(r"^zrobione\s+(\d+)\.(\d+)\s*$", low)
+    if m_done:
+        task_no = int(m_done.group(1)); item_no = int(m_done.group(2))
+        t = _resolve_task_for_live_number(task_no)
+        if not t:
+            return _as_reply("checklist", f"Nie ma zadania #{task_no} na dziś.")
+        ok = tasks_mod.toggle_checklist_item(int(t["id"]), item_no, True) if hasattr(tasks_mod, "toggle_checklist_item") else None
+        return _as_reply("checklist", "✅ Odhaczone." if ok else "Nie udało się odhaczyć pozycji.")
+
+    m_undo = re.search(r"^odznacz\s+(\d+)\.(\d+)\s*$", low)
+    if m_undo:
+        task_no = int(m_undo.group(1)); item_no = int(m_undo.group(2))
+        t = _resolve_task_for_live_number(task_no)
+        if not t:
+            return _as_reply("checklist", f"Nie ma zadania #{task_no} na dziś.")
+        ok = tasks_mod.toggle_checklist_item(int(t["id"]), item_no, False) if hasattr(tasks_mod, "toggle_checklist_item") else None
+        return _as_reply("checklist", "✅ Odznaczone." if ok else "Nie udało się odznaczyć pozycji.")
+
+    m_del_item = re.search(r"^(?:usu[ńn]\s+z)\s+(\d+)\s*:\s*(.+)$", low)
+    if m_del_item:
+        task_no = int(m_del_item.group(1)); txt = message.split(":", 1)[1].strip()
+        t = _resolve_task_for_live_number(task_no)
+        if not t:
+            return _as_reply("checklist", f"Nie ma zadania #{task_no} na dziś.")
+        ok = tasks_mod.remove_checklist_item_manual(int(t["id"]), txt) if hasattr(tasks_mod, "remove_checklist_item_manual") else None
+        return _as_reply("checklist", f"✅ Usunięto: {txt}" if ok else "Nie udało się usunąć pozycji.")
+
 
     # =============================
     # ORIGIN settings
@@ -1059,58 +521,6 @@ def route_intent(message: str, persona: str = "b2c", mode: Optional[str] = None,
         ok = _set_place("origin_current", addr)
         return _as_reply("set_origin_current", "✅ OK, zapamiętałem gdzie jesteś." if ok else "Nie udało się zapisać lokalizacji.")
 
-    # =============================
-    # SMART PLAN / V10
-    # =============================
-    if low in {"ułóż dzień", "uloz dzien", "ułoz dzien", "ułóż dzien"}:
-        try:
-            from app.b2c.smart_plan import build_smart_day_plan
-            today_iso = date.today().isoformat()
-            tasks_today = tasks_mod.list_tasks_for_date(today_iso) or []
-            origin_addr = _get_origin_address()
-            transport_default = _get_place("travel_mode_default") or "samochod"
-            plan = build_smart_day_plan(tasks_today, today_iso, origin_addr, transport_default, buffer_min=TRAVEL_BUFFER_MIN)
-            return _as_reply("smart_day_plan", plan)
-        except Exception:
-            return _as_reply("smart_day_plan", "Nie mogę teraz ułożyć dnia.")
-
-    if low in {"przeplanuj dzień", "przeplanuj dzien"}:
-        try:
-            from app.b2c.smart_plan import build_replanned_day_plan
-            today_iso = date.today().isoformat()
-            tasks_today = tasks_mod.list_tasks_for_date(today_iso) or []
-            origin_addr = _get_origin_address()
-            transport_default = _get_place("travel_mode_default") or "samochod"
-            plan = build_replanned_day_plan(tasks_today, today_iso, origin_addr, transport_default, buffer_min=TRAVEL_BUFFER_MIN)
-            return _as_reply("smart_day_plan", plan)
-        except Exception:
-            return _as_reply("smart_day_plan", "Nie mogę teraz przeplanować dnia.")
-
-    if low in {"ile mam wolnego czasu", "wolny czas", "ile wolnego czasu"}:
-        try:
-            from app.b2c.smart_plan import summarize_free_time
-            today_iso = date.today().isoformat()
-            tasks_today = tasks_mod.list_tasks_for_date(today_iso) or []
-            summary = summarize_free_time(tasks_today, today_iso)
-            return _as_reply("free_time_summary", summary)
-        except Exception:
-            return _as_reply("free_time_summary", "Nie mogę teraz policzyć wolnego czasu.")
-
-    # =============================
-    # PLAN DNIA
-    # =============================
-    if low in {"plan dnia", "co dziś", "co dzis", "dzisiaj", "dziś"}:
-        try:
-            from app.b2c.day_plan import build_day_plan
-            today_iso = date.today().isoformat()
-            tasks_today = tasks_mod.list_tasks_for_date(today_iso) or []
-            origin_addr = _get_origin_address()
-            transport_default = _get_place("travel_mode_default") or "samochodem"
-            plan = build_day_plan(tasks_today, today_iso, origin_addr, transport_default, buffer_min=TRAVEL_BUFFER_MIN)
-            return _as_reply("day_plan", plan)
-        except Exception:
-            return _as_reply("day_plan", "Nie mogę teraz wygenerować planu dnia.")
-
 
     # =============================
     # TRAVEL mode + ETA (MVP)
@@ -1125,8 +535,6 @@ def route_intent(message: str, persona: str = "b2c", mode: Optional[str] = None,
         return _as_reply("set_travel_mode", f"✅ Ustawiono tryb: {pretty}.")
 
     # Shortcuts without "tryb:"
-    # If travel flow is active, do not swallow transport here.
-    # Let the pending travel handler below calculate ETA / leave time.
     pending_t_guard = tasks_mod.get_pending_travel()
     mode_norm = _normalize_travel_mode(low)
     if (not pending_t_guard) and mode_norm and low in {"samochod","samochód","samochodem","autobus","komunikacja","komunikacją","rower","rowerem","pieszo"}:
@@ -1321,25 +729,6 @@ def route_intent(message: str, persona: str = "b2c", mode: Optional[str] = None,
         emoji = PRIORITY_EMOJI.get(pr, f"p{pr}")
         return _as_reply("set_priority", f"✅ Ustawiono priorytet {emoji} dla zadania #{n} na {_label_for_date(target_date)}.")
 
-
-    # =============================
-    # DEV / RESET DZIŚ
-    # =============================
-    if low in {"/reset_dzis", "/reset dzis", "/reset dziś", "reset dzis", "reset dziś"}:
-        removed = 0
-        try:
-            removed = int(tasks_mod.clear_tasks_for_date(date.today().isoformat()))
-        except Exception:
-            removed = 0
-        for fn_name in ("clear_pending_travel", "clear_pending_reminder", "clear_pending_checklist", "clear_pending_clear"):
-            try:
-                fn = getattr(tasks_mod, fn_name, None)
-                if fn:
-                    fn()
-            except Exception:
-                pass
-        return _as_reply("reset_today", f"🧹 Usunięto {removed} zadań na dziś.")
-
     # =============================
     # DELETE (LIVE numeracja) + data
     # usuń 2
@@ -1507,37 +896,28 @@ def route_intent(message: str, persona: str = "b2c", mode: Optional[str] = None,
     pending_t = tasks_mod.get_pending_travel()
     if pending_t:
         created_from = str(pending_t.get("created_from") or "")
-        skip_pending_for_new_command = _looks_like_new_task_request(message)
         try:
             pending_task_id = int(pending_t.get("task_id"))
         except Exception:
             pending_task_id = None
     
         # Step 1: ask/handle START (always after adding timed+location task)
-        if created_from == "add_start" and pending_task_id is not None and not skip_pending_for_new_command:
+        if created_from == "add_start" and pending_task_id is not None:
             if _is_command_like(message) or not (message or '').strip():
                 return _as_reply("set_origin_mode", "Skąd ruszasz? Napisz: `dom` / `praca` / `tu` albo podaj adres startu.")
     
             ans = (message or "").strip()
-            mode_key, origin_addr = _resolve_origin_from_answer(ans)
-            if mode_key == ORIGIN_HOME:
+            ans_low = ans.lower()
+            if ans_low in {"dom", "home"}:
                 _set_place("origin_mode", ORIGIN_HOME)
-            elif mode_key == ORIGIN_WORK:
+            elif ans_low in {"praca", "work"}:
                 _set_place("origin_mode", ORIGIN_WORK)
-            elif mode_key == ORIGIN_CURRENT:
-                _set_place("origin_mode", ORIGIN_CURRENT)
+            elif ans_low in {"tu", "tutaj", "obecna", "obecna lokalizacja"}:
+                _set_place("origin_mode", ORIGIN_HERE)
             else:
+                # Treat as explicit address start
                 _set_place("origin_custom", ans)
                 _set_place("origin_mode", ORIGIN_CUSTOM)
-
-            try:
-                tasks_mod.update_task(
-                    pending_task_id,
-                    start_origin_mode=mode_key,
-                    start_origin=origin_addr or ans,
-                )
-            except Exception:
-                pass
     
             # If task already has travel mode, skip asking and go straight to reminder proposal
             t = tasks_mod.get_task(pending_task_id)
@@ -1561,18 +941,8 @@ def route_intent(message: str, persona: str = "b2c", mode: Optional[str] = None,
                                 dt = dt.astimezone().replace(tzinfo=None)
                             remind_dt = dt - timedelta(minutes=int(mins) + 10)
                             reminder_at = remind_dt.strftime("%Y-%m-%dT%H:%M")
-                            try:
-                                tasks_mod.update_task(
-                                    pending_task_id,
-                                    eta_min=int(mins),
-                                    leave_at=remind_dt.strftime("%H:%M"),
-                                    reminder_at=reminder_at,
-                                    start_origin=origin,
-                                )
-                            except Exception:
-                                pass
                             tasks_mod.set_pending_reminder(pending_task_id, reminder_at, created_from="add")
-                            return _as_reply("set_reminder", f"✅ OK. Start: **{origin}**. ETA: **{mins} min**. Proponuję wyjść o **{remind_dt.strftime('%H:%M')}**. Ustawić przypomnienie? (tak/nie)")
+                            return _as_reply("set_reminder", f"✅ OK. ETA: **{mins} min**. Proponuję wyjść o **{remind_dt.strftime('%H:%M')}**. Ustawić przypomnienie? (tak/nie)")
     
                 return _as_reply("set_origin_mode", "✅ OK.")
     
@@ -1581,7 +951,7 @@ def route_intent(message: str, persona: str = "b2c", mode: Optional[str] = None,
             return _as_reply("set_travel_mode", "✅ OK. Jak jedziesz? Napisz: `samochodem` / `komunikacją` / `rowerem` / `pieszo`.")
     
         # Step 2: handle travel mode
-        if created_from == "add_mode" and pending_task_id is not None and not skip_pending_for_new_command:
+        if created_from == "add_mode" and pending_task_id is not None:
             if _is_command_like(message) or not (message or "").strip():
                 return _as_reply("set_travel_mode", "✅ OK. Jak jedziesz? Napisz: `samochodem` / `komunikacją` / `rowerem` / `pieszo`.")
             out = tasks_mod.apply_travel_mode_to_pending(message)
@@ -1606,19 +976,9 @@ def route_intent(message: str, persona: str = "b2c", mode: Optional[str] = None,
                                 dt = dt.astimezone().replace(tzinfo=None)
                             remind_dt = dt - timedelta(minutes=int(mins) + 10)
                             reminder_at = remind_dt.strftime("%Y-%m-%dT%H:%M")
-                            try:
-                                tasks_mod.update_task(
-                                    pending_task_id,
-                                    eta_min=int(mins),
-                                    leave_at=remind_dt.strftime("%H:%M"),
-                                    reminder_at=reminder_at,
-                                    start_origin=origin,
-                                )
-                            except Exception:
-                                pass
                             tasks_mod.set_pending_reminder(pending_task_id, reminder_at, created_from="add")
                             base = _reply_from_any(out, default="OK")
-                            return _as_reply("set_reminder", f"{base}\n\nStart: **{origin}**. ETA: **{mins} min**. Proponuję wyjść o **{remind_dt.strftime('%H:%M')}**. Ustawić przypomnienie? (tak/nie)")
+                            return _as_reply("set_reminder", f"{base}\n\nETA: **{mins} min**. Proponuję wyjść o **{remind_dt.strftime('%H:%M')}**. Ustawić przypomnienie? (tak/nie)")
     
                 return _as_reply("set_travel_mode", _reply_from_any(out, default="OK"))
     
@@ -1626,120 +986,11 @@ def route_intent(message: str, persona: str = "b2c", mode: Optional[str] = None,
                 return _as_reply("set_travel_mode", "Jak jedziesz? Napisz: `samochodem` / `komunikacją` / `rowerem` / `pieszo`.")
     
         # fallback (older flows)
-        if not skip_pending_for_new_command:
-            out = tasks_mod.apply_travel_mode_to_pending(message)
-            if out is not None:
-                return _as_reply("set_travel_mode", _reply_from_any(out, default="OK"))
-            if not _is_command_like(message):
-                return _as_reply("set_travel_mode", "Jak jedziesz? Napisz: `samochodem` / `komunikacją` / `rowerem` / `pieszo`.")
-
-
-    # ===== INBOX v4 TASK CONVERSION =====
-    m_create_task = re.match(r"^utw[oó]rz zadanie z inbox\s+(\d+)\s+(.+)$", message, flags=re.I)
-    if m_create_task:
-        from app.b2c import inbox as inbox_mod
-        n = int(m_create_task.group(1))
-        suffix = m_create_task.group(2).strip()
-        item = inbox_mod.get_inbox_by_live_number(n)
-        if not item:
-            return _as_reply("inbox_to_task", f"Nie ma wpisu #{n} w Inbox.")
-        kind = str(item.get("kind") or "").strip().lower()
-        if kind and kind != "task":
-            return _as_reply("inbox_to_task", f"Wpis #{n} ma typ `{kind}`. Dla tasków użyj wpisu typu `[task]`.")
-        synthetic = f"dodaj: {item['text']} {suffix}".strip()
-        out = tasks_mod.add_task(synthetic)
-        task = out.get("task") if isinstance(out, dict) else None
-        if isinstance(task, dict):
-            inbox_mod.pop_inbox_by_live_number(n)
-        return _as_reply("inbox_to_task", _reply_from_any(out, default="OK"))
-
-    # ===== INBOX v3 PROCESSING =====
-    if low == "przetwórz inbox" or low == "przetworz inbox":
-        from app.b2c import inbox as inbox_mod
-        out = inbox_mod.preview_processing()
-        return _as_reply("inbox_process_preview", out.get("reply", "Inbox jest pusty."))
-
-    if low.startswith("przetwórz inbox ") or low.startswith("przetworz inbox "):
-        from app.b2c import inbox as inbox_mod
-        m = re.search(r"(\d+)$", low)
-        if not m:
-            return _as_reply("inbox_process", "Użyj: `przetwórz inbox 1`.")
-        out = inbox_mod.process_inbox_item(int(m.group(1)))
-        return _as_reply("inbox_process", out.get("reply", "OK"))
-
-    if low == "pomysły" or low == "pomysly":
-        from app.b2c import inbox as inbox_mod
-        out = inbox_mod.list_bucket(inbox_mod.IDEAS_FILE, "Pomysły")
-        return _as_reply("ideas_list", out.get("reply", "Pomysły są puste."))
-
-    if low == "notatki":
-        from app.b2c import inbox as inbox_mod
-        out = inbox_mod.list_bucket(inbox_mod.NOTES_FILE, "Notatki")
-        return _as_reply("notes_list", out.get("reply", "Notatki są puste."))
-
-    if low == "reminders":
-        from app.b2c import inbox as inbox_mod
-        out = inbox_mod.list_bucket(inbox_mod.REMINDERS_FILE, "Reminders")
-        return _as_reply("reminders_list", out.get("reply", "Reminders są puste."))
-
-    # CHECKLISTA przypięta do zadania
-    # =============================
-    def _resolve_task_for_live_number(num: int, d: date | None = None) -> Optional[Dict[str, Any]]:
-        d = d or date.today()
-        tasks_for_day = _sort_for_list(tasks_mod.list_tasks_for_date(d) or [])
-        if 1 <= num <= len(tasks_for_day):
-            return tasks_for_day[num - 1]
-        return None
-
-    m_add_checklist = re.match(r"^dodaj do zadania\s+(\d+)\s+([^:]+):\s*(.+)$", message, flags=re.I)
-    if m_add_checklist:
-        live_no = int(m_add_checklist.group(1))
-        list_title = m_add_checklist.group(2).strip().rstrip(":")
-        items_raw = m_add_checklist.group(3).strip()
-        task_live = _resolve_task_for_live_number(live_no)
-        if not task_live:
-            return _as_reply("checklist", f"Nie ma zadania #{live_no} na dziś.")
-
-        items = [x.strip().lstrip("-").strip() for x in items_raw.split(",") if x.strip().lstrip("-").strip()]
-        if not items:
-            return _as_reply("checklist", "Podaj pozycje listy po dwukropku, np. `dodaj do zadania 1 kup: mleko, chleb`.")
-
-        checklist = {
-            "title": list_title or "Lista",
-            "items": [{"text": item, "done": False} for item in items],
-        }
-        saved = tasks_mod.update_task(int(task_live.get("id")), checklist=checklist) if hasattr(tasks_mod, "update_task") else None
-        if not saved:
-            return _as_reply("checklist", "Nie udało się dodać checklisty.")
-
-        lines = [f"✅ Dodano checklistę do zadania #{live_no}", "", f"{checklist['title']}:"]
-        for idx_i, item in enumerate(checklist["items"], start=1):
-            lines.append(f"{live_no}.{idx_i} ☐ {item['text']}")
-        return _as_reply("checklist", "\n".join(lines))
-
-    m_add_to = re.match(r"^dodaj do\s+(\d+)\s*:\s*(.+)$", message, flags=re.I)
-    if m_add_to:
-        live_no = int(m_add_to.group(1))
-        item_text = m_add_to.group(2).strip()
-        task_live = _resolve_task_for_live_number(live_no)
-        if not task_live:
-            return _as_reply("checklist", f"Nie ma zadania #{live_no} na dziś.")
-        ok = tasks_mod.add_checklist_item_manual(int(task_live.get("id")), item_text) if hasattr(tasks_mod, "add_checklist_item_manual") else None
-        return _as_reply("checklist", f"✅ Dodano: {item_text}" if ok else "Nie udało się dodać pozycji.")
-
-    # NLP TASK INPUT (v9)
-    synthetic_add = _build_nlp_add_command(message)
-    if synthetic_add:
-        message = synthetic_add
-        low = message.strip().lower()
-
-    # =============================
-    # STABLE NLP (czas względny / naturalny / checklist task)
-    # =============================
-    nlp_out = _maybe_handle_stable_nlp(message)
-    if nlp_out is not None:
-        return nlp_out
-
+        out = tasks_mod.apply_travel_mode_to_pending(message)
+        if out is not None:
+            return _as_reply("set_travel_mode", _reply_from_any(out, default="OK"))
+        if not _is_command_like(message):
+            return _as_reply("set_travel_mode", "Jak jedziesz? Napisz: `samochodem` / `komunikacją` / `rowerem` / `pieszo`.")
     # DODAJ (spójny numer LIVE z listą)
     # =============================
     if low.startswith("dodaj:") or low.startswith("dodaj "):
@@ -1836,109 +1087,6 @@ def route_intent(message: str, persona: str = "b2c", mode: Optional[str] = None,
     
         return _as_reply("add_task", _reply_from_any(out))
     
-
-    if low in {"przygotuj mój dzień", "przygotuj moj dzien", "briefing dnia", "monitor dnia", "co za chwilę", "co za chwile"}:
-        try:
-            from app.b2c.v24_brain import proactive_day_brief
-            return _as_reply("v24_focus_brief", proactive_day_brief(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("v24_focus_brief", "Nie mogę teraz przygotować proaktywnego briefingu dnia.")
-
-    if low in {"czy mam już wyjść", "czy mam juz wyjsc", "czy powinnam już wyjść", "czy powinnam juz wyjsc", "proaktywne przypomnienie", "co za chwilę mam zrobić", "co za chwile mam zrobic"}:
-        try:
-            from app.b2c.v24_brain import leave_check
-            return _as_reply("v24_leave_check", leave_check(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("v24_leave_check", "Nie mogę teraz sprawdzić, czy już trzeba wychodzić.")
-
-    if low in {"inbox brain", "co w inboxie", "przegląd inboxa", "przeglad inboxa", "przejrzyj inbox", "inbox briefing"}:
-        try:
-            from app.b2c.v24_brain import inbox_brain_summary
-            return _as_reply("v24_inbox_brain", inbox_brain_summary(tasks_mod))
-        except Exception:
-            return _as_reply("v24_inbox_brain", "Nie mogę teraz przygotować przeglądu inboxa.")
-
-    if low in {"co robić z inboxem", "co robic z inboxem", "następny krok w inboxie", "nastepny krok w inboxie"}:
-        try:
-            from app.b2c.v24_brain import inbox_brain_next
-            return _as_reply("v24_inbox_next", inbox_brain_next(tasks_mod))
-        except Exception:
-            return _as_reply("v24_inbox_next", "Nie mogę teraz podpowiedzieć kolejnego kroku dla inboxa.")
-
-    # =============================
-    # CONTEXT BRAIN v26
-    # =============================
-    m_ctx_minutes = re.match(r"^(?:mam|zostało mi|zostalo mi|mam jeszcze)\s+(\d{1,3})\s+min(?:ut(?:y)?)?$", low)
-    if m_ctx_minutes:
-        try:
-            from app.b2c.v26_brain import set_context
-            return _as_reply("v26_set_minutes", set_context("available_minutes", int(m_ctx_minutes.group(1))))
-        except Exception:
-            return _as_reply("v26_set_minutes", "Nie mogę teraz ustawić dostępnego czasu.")
-
-    if low in {"jestem w domu", "pracuję z domu", "praca z domu"}:
-        try:
-            from app.b2c.v26_brain import set_context
-            return _as_reply("v26_set_place", set_context("place", "dom"))
-        except Exception:
-            return _as_reply("v26_set_place", "Nie mogę teraz ustawić miejsca.")
-
-    if low in {"jestem w pracy", "pracuję", "pracuje"}:
-        try:
-            from app.b2c.v26_brain import set_context
-            return _as_reply("v26_set_place", set_context("place", "praca"))
-        except Exception:
-            return _as_reply("v26_set_place", "Nie mogę teraz ustawić miejsca.")
-
-    if low in {"jestem w drodze", "w drodze"}:
-        try:
-            from app.b2c.v26_brain import set_context
-            return _as_reply("v26_set_state", set_context("state", "w drodze"))
-        except Exception:
-            return _as_reply("v26_set_state", "Nie mogę teraz ustawić stanu.")
-
-    if low in {"tryb focus", "deep work", "tryb deep work"}:
-        try:
-            from app.b2c.v26_brain import set_context
-            return _as_reply("v26_set_mode", set_context("mode", "focus"))
-        except Exception:
-            return _as_reply("v26_set_mode", "Nie mogę teraz ustawić trybu.")
-
-    if low in {"tryb admin", "admin"}:
-        try:
-            from app.b2c.v26_brain import set_context
-            return _as_reply("v26_set_mode", set_context("mode", "admin"))
-        except Exception:
-            return _as_reply("v26_set_mode", "Nie mogę teraz ustawić trybu.")
-
-    if low in {"kontekst", "context", "context brain"}:
-        try:
-            from app.b2c.v26_brain import context_summary
-            return _as_reply("v26_summary", context_summary())
-        except Exception:
-            return _as_reply("v26_summary", "Nie mogę teraz pokazać kontekstu.")
-
-    if low in {"wyczyść kontekst", "wyczysc kontekst", "reset kontekstu"}:
-        try:
-            from app.b2c.v26_brain import clear_context
-            return _as_reply("v26_clear", clear_context())
-        except Exception:
-            return _as_reply("v26_clear", "Nie mogę teraz wyczyścić kontekstu.")
-
-    if low in {"mam 10 minut", "mam dziesięć minut", "mam dziesiec minut", "mam chwilę", "mam chwile", "co mogę zrobić teraz", "co moge zrobic teraz", "co pasuje do mojego kontekstu"}:
-        try:
-            from app.b2c.v26_brain import suggest_by_context
-            return _as_reply("v26_suggest", suggest_by_context(tasks_mod))
-        except Exception:
-            return _as_reply("v26_suggest", "Nie mogę teraz dobrać zadania do kontekstu.")
-
-    if low in {"jakie mam opcje", "jakie opcje", "co mogę zrobić w 10 minut", "co moge zrobic w 10 minut"}:
-        try:
-            from app.b2c.v26_brain import quick_options
-            return _as_reply("v26_options", quick_options(tasks_mod))
-        except Exception:
-            return _as_reply("v26_options", "Nie mogę teraz przygotować krótkich opcji.")
-
     # =============================
     # =============================
     # MORNING (no questions; just overview + refresh ETA cache)
@@ -1995,390 +1143,4 @@ def route_intent(message: str, persona: str = "b2c", mode: Optional[str] = None,
             out_lines.append("• (brak zadań z konkretną godziną)")
     
         return _as_reply("morning", "\n".join(out_lines))
-    # =============================
-    # LEARNING BRAIN v27
-    # =============================
-    if low in {"learning brain", "nauka", "czego się nauczyłaś", "czego sie nauczylas", "czego się nauczyles", "czego sie nauczyles"}:
-        try:
-            from app.b2c.v27_brain import learning_summary
-            return _as_reply("v27_learning_summary", learning_summary())
-        except Exception:
-            return _as_reply("v27_learning_summary", "Nie mogę teraz pokazać podsumowania nauki.")
-
-    if low in {"zaplanuj dzień inteligentnie", "zaplanuj dzien inteligentnie", "inteligentny plan dnia", "learning plan"}:
-        try:
-            from app.b2c.v27_brain import smart_learning_plan
-            return _as_reply("v27_learning_plan", smart_learning_plan(tasks_mod))
-        except Exception:
-            return _as_reply("v27_learning_plan", "Nie mogę teraz przygotować inteligentnego planu dnia.")
-
-    # =============================
-    # FOCUS LOOP v25
-    # =============================
-    m_focus_start = re.match(r"^(?:zacznij(?:\s+zadanie)?|start(?:\s+fokusu)?|focus start)(?:\s+(\d+))?$", low)
-    if m_focus_start:
-        try:
-            from app.b2c.v25_brain import start_focus
-            task_id = int(m_focus_start.group(1)) if m_focus_start.group(1) else None
-            return _as_reply("v25_focus_start", start_focus(tasks_mod, task_id))
-        except Exception:
-            return _as_reply("v25_focus_start", "Nie mogę teraz uruchomić fokusu.")
-
-    if low in {"ile zostało czasu", "ile zostalo czasu", "status fokusu", "status focus", "focus status"}:
-        try:
-            from app.b2c.v25_brain import focus_status
-            return _as_reply("v25_focus_status", focus_status())
-        except Exception:
-            return _as_reply("v25_focus_status", "Nie mogę teraz sprawdzić statusu fokusu.")
-
-    if low in {"skończyłem", "skonczylem", "koniec fokusu", "finish focus", "focus done"}:
-        try:
-            from app.b2c.v25_brain import finish_focus
-            return _as_reply("v25_focus_done", finish_focus(tasks_mod))
-        except Exception:
-            return _as_reply("v25_focus_done", "Nie mogę teraz zakończyć fokusu.")
-
-    if low in {"anuluj fokus", "cancel focus", "przerwij fokus", "stop focus"}:
-        try:
-            from app.b2c.v25_brain import cancel_focus
-            return _as_reply("v25_focus_cancel", cancel_focus())
-        except Exception:
-            return _as_reply("v25_focus_cancel", "Nie mogę teraz anulować fokusu.")
-
-    # =============================
-    # SELF-OPTIMIZING BRAIN v28
-    # =============================
-    if low in {"self-optimizing brain", "self optimizing brain", "optymalizuj się", "optymalizuj sie", "co poprawić w planie", "co poprawic w planie"}:
-        try:
-            from app.b2c.v28_brain import self_optimizing_brain
-            return _as_reply("v28_optimize", self_optimizing_brain(tasks_mod))
-        except Exception:
-            return _as_reply("v28_optimize", "Nie mogę teraz przygotować sugestii optymalizacji.")
-
-    if low in {"plan adaptacyjny", "adaptive plan", "zoptymalizowany plan", "zaplanuj adaptacyjnie"}:
-        try:
-            from app.b2c.v28_brain import adaptive_plan
-            return _as_reply("v28_adaptive_plan", adaptive_plan(tasks_mod))
-        except Exception:
-            return _as_reply("v28_adaptive_plan", "Nie mogę teraz przygotować planu adaptacyjnego.")
-
-    # =============================
-    # COMMAND CENTER v29
-    # =============================
-    if low in {"centrum dowodzenia", "command center", "status dnia", "dashboard", "panel dnia"}:
-        try:
-            from app.b2c.v29_brain import command_center
-            return _as_reply("v29_command_center", command_center(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("v29_command_center", "Nie mogę teraz otworzyć centrum dowodzenia.")
-
-    # =============================
-    # EVENT BRAIN v34
-    # =============================
-    if low in {"event brain", "wydarzenia", "jakie mam wydarzenia", "pokaż wydarzenia", "pokaz wydarzenia"}:
-        try:
-            from app.b2c.v34_brain import event_brain_summary
-            return _as_reply("v34_events", event_brain_summary())
-        except Exception:
-            return _as_reply("v34_events", "Nie mogę teraz pokazać wydarzeń.")
-
-    if low in {"wydarzenia dnia", "co mam dziś w kalendarzu", "co mam dzis w kalendarzu", "co dziś mam", "co dzis mam"}:
-        try:
-            from app.b2c.v34_brain import today_events
-            return _as_reply("v34_today_events", today_events())
-        except Exception:
-            return _as_reply("v34_today_events", "Nie mogę teraz pokazać wydarzeń dnia.")
-
-    # =============================
-    # CALENDAR BRAIN v36
-    # =============================
-    if low in {"calendar brain", "kalendarz dnia", "calendar", "plan kalendarza"}:
-        try:
-            from app.b2c.v36_brain import calendar_brain
-            return _as_reply("v36_calendar", calendar_brain(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=0))
-        except Exception:
-            return _as_reply("v36_calendar", "Nie mogę teraz zbudować kalendarza dnia.")
-
-    if low in {"kalendarz jutra", "calendar tomorrow", "jutrzejszy kalendarz"}:
-        try:
-            from app.b2c.v36_brain import calendar_brain
-            return _as_reply("v36_calendar_tomorrow", calendar_brain(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=1))
-        except Exception:
-            return _as_reply("v36_calendar_tomorrow", "Nie mogę teraz zbudować kalendarza jutra.")
-
-    # =============================
-    # CONFLICT RESOLVER v36.1
-    # =============================
-    if low in {"rozwiąż konflikt", "rozwiaz konflikt", "conflict resolver", "pokaż konflikt", "pokaz konflikt"}:
-        try:
-            from app.b2c.v36_1_brain import conflict_resolver
-            return _as_reply("v36_1_conflict", conflict_resolver())
-        except Exception:
-            return _as_reply("v36_1_conflict", "Nie mogę teraz pokazać konfliktu.")
-
-    if low in {"zachowaj nowe", "keep new"}:
-        try:
-            from app.b2c.v36_1_brain import keep_new
-            return _as_reply("v36_1_keep_new", keep_new())
-        except Exception:
-            return _as_reply("v36_1_keep_new", "Nie mogę teraz zachować nowego wydarzenia.")
-
-    if low in {"zachowaj stare", "keep old"}:
-        try:
-            from app.b2c.v36_1_brain import keep_old
-            return _as_reply("v36_1_keep_old", keep_old())
-        except Exception:
-            return _as_reply("v36_1_keep_old", "Nie mogę teraz usunąć nowego wydarzenia.")
-
-    m_conf_move = re.match(r"^przesuń nowe na\s+(\d{1,2}:\d{2})$", low)
-    if not m_conf_move:
-        m_conf_move = re.match(r"^przesun nowe na\s+(\d{1,2}:\d{2})$", low)
-    if m_conf_move:
-        try:
-            from app.b2c.v36_1_brain import move_new
-            return _as_reply("v36_1_move_new", move_new(m_conf_move.group(1)))
-        except Exception:
-            return _as_reply("v36_1_move_new", "Nie mogę teraz przesunąć nowego wydarzenia.")
-
-    if low in {"wyczyść konflikt", "wyczysc konflikt"}:
-        try:
-            from app.b2c.v36_1_brain import clear_conflict
-            clear_conflict()
-            return _as_reply("v36_1_clear_conflict", "🧹 Wyczyściłam aktywny konflikt.")
-        except Exception:
-            return _as_reply("v36_1_clear_conflict", "Nie mogę teraz wyczyścić konfliktu.")
-
-    # =============================
-    # SMART DEDUP v36.2
-    # =============================
-    if low in {"smart dedup", "dedup wydarzeń", "dedup wydarzen", "scal duplikaty wydarzeń", "scal duplikaty wydarzen"}:
-        try:
-            from app.b2c.v34_brain import smart_dedup_events
-            return _as_reply("v36_2_smart_dedup", smart_dedup_events())
-        except Exception:
-            return _as_reply("v36_2_smart_dedup", "Nie mogę teraz wykonać smart dedup.")
-
-    # =============================
-    # TRUE DAILY PLANNER v37
-    # =============================
-    if low in {"true daily planner", "plan dnia", "daily planner", "prawdziwy plan dnia"}:
-        try:
-            from app.b2c.v36_brain import true_daily_planner
-            return _as_reply("v37_true_daily_planner", true_daily_planner(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=0))
-        except Exception:
-            return _as_reply("v37_true_daily_planner", "Nie mogę teraz zbudować prawdziwego planu dnia.")
-
-    if low in {"plan jutra", "true daily planner jutro", "prawdziwy plan jutra"}:
-        try:
-            from app.b2c.v36_brain import true_daily_planner
-            return _as_reply("v37_true_daily_planner_tomorrow", true_daily_planner(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=1))
-        except Exception:
-            return _as_reply("v37_true_daily_planner_tomorrow", "Nie mogę teraz zbudować planu jutra.")
-
-    # =============================
-    # SCHEDULER AI v38
-    # =============================
-    if low in {"scheduler ai", "ai scheduler", "napraw plan", "napraw harmonogram"}:
-        try:
-            from app.b2c.v38_brain import scheduler_ai
-            return _as_reply("v38_scheduler_ai", scheduler_ai(tasks_mod, day_offset=0))
-        except Exception:
-            return _as_reply("v38_scheduler_ai", "Nie mogę teraz przeanalizować planu.")
-
-    if low in {"scheduler ai jutra", "scheduler ai jutro", "napraw plan jutra", "napraw harmonogram jutra"}:
-        try:
-            from app.b2c.v38_brain import scheduler_ai
-            return _as_reply("v38_scheduler_ai_tomorrow", scheduler_ai(tasks_mod, day_offset=1))
-        except Exception:
-            return _as_reply("v38_scheduler_ai_tomorrow", "Nie mogę teraz przeanalizować planu jutra.")
-
-    if low in {"napraw plan dnia", "auto repair", "autonapraw plan"}:
-        try:
-            from app.b2c.v38_brain import auto_repair_plan
-            return _as_reply("v38_auto_repair", auto_repair_plan(tasks_mod, day_offset=0))
-        except Exception:
-            return _as_reply("v38_auto_repair", "Nie mogę teraz automatycznie naprawić planu dnia.")
-
-    if low in {"napraw plan jutra automatycznie", "autonapraw plan jutra"}:
-        try:
-            from app.b2c.v38_brain import auto_repair_plan
-            return _as_reply("v38_auto_repair_tomorrow", auto_repair_plan(tasks_mod, day_offset=1))
-        except Exception:
-            return _as_reply("v38_auto_repair_tomorrow", "Nie mogę teraz automatycznie naprawić planu jutra.")
-
-    # =============================
-    # TRAVEL SCHEDULER v39
-    # =============================
-    if low in {"travel scheduler", "plan dojazdów", "plan dojazdow", "logistyka dnia"}:
-        try:
-            from app.b2c.v39_brain import travel_scheduler
-            return _as_reply("v39_travel_scheduler", travel_scheduler(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=0, buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("v39_travel_scheduler", "Nie mogę teraz zbudować planu dojazdów.")
-
-    if low in {"travel scheduler jutro", "plan dojazdów jutra", "plan dojazdow jutra", "logistyka jutra"}:
-        try:
-            from app.b2c.v39_brain import travel_scheduler
-            return _as_reply("v39_travel_scheduler_tomorrow", travel_scheduler(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=1, buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("v39_travel_scheduler_tomorrow", "Nie mogę teraz zbudować planu dojazdów na jutro.")
-
-    if low in {"napraw logistykę dnia", "napraw logistyke dnia", "travel repair", "napraw dojazdy"}:
-        try:
-            from app.b2c.v39_brain import auto_repair_travel_plan
-            return _as_reply("v39_travel_repair", auto_repair_travel_plan(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=0, buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("v39_travel_repair", "Nie mogę teraz przeanalizować logistyki dnia.")
-
-    if low in {"napraw logistykę jutra", "napraw logistyke jutra", "napraw dojazdy jutra"}:
-        try:
-            from app.b2c.v39_brain import auto_repair_travel_plan
-            return _as_reply("v39_travel_repair_tomorrow", auto_repair_travel_plan(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=1, buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("v39_travel_repair_tomorrow", "Nie mogę teraz przeanalizować logistyki jutra.")
-
-    # =============================
-    # AUTO TRAVEL PLANNER v40
-    # =============================
-    if low in {"auto travel planner", "travel ai", "planner dojazdów", "planner dojazdow"}:
-        try:
-            from app.b2c.v40_brain import auto_travel_planner
-            return _as_reply("v40_auto_travel_planner", auto_travel_planner(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=0, buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("v40_auto_travel_planner", "Nie mogę teraz zbudować auto travel planera.")
-
-    if low in {"auto travel planner jutro", "travel ai jutro", "planner dojazdów jutra", "planner dojazdow jutra"}:
-        try:
-            from app.b2c.v40_brain import auto_travel_planner
-            return _as_reply("v40_auto_travel_planner_tomorrow", auto_travel_planner(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=1, buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("v40_auto_travel_planner_tomorrow", "Nie mogę teraz zbudować auto travel planera na jutro.")
-
-    if low in {"napraw logistykę jutra automatycznie", "napraw logistyke jutra automatycznie", "auto travel repair jutro"}:
-        try:
-            from app.b2c.v40_brain import auto_repair_travel_plan
-            return _as_reply("v40_auto_travel_repair_tomorrow", auto_repair_travel_plan(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=1, buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("v40_auto_travel_repair_tomorrow", "Nie mogę teraz automatycznie naprawić logistyki jutra.")
-
-    if low in {"napraw logistykę dnia automatycznie", "napraw logistyke dnia automatycznie", "auto travel repair"}:
-        try:
-            from app.b2c.v40_brain import auto_repair_travel_plan
-            return _as_reply("v40_auto_travel_repair", auto_repair_travel_plan(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=0, buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("v40_auto_travel_repair", "Nie mogę teraz automatycznie naprawić logistyki dnia.")
-
-    # =============================
-    # GLOBAL DAY OPTIMIZER v41
-    # =============================
-    if low in {"global day optimizer", "optymalizuj dzień", "optymalizuj dzien", "global optimizer"}:
-        try:
-            from app.b2c.v41_brain import global_day_optimizer
-            return _as_reply("v41_global_optimizer", global_day_optimizer(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=0, buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("v41_global_optimizer", "Nie mogę teraz przeanalizować całego dnia.")
-
-    if low in {"global day optimizer jutro", "optymalizuj jutro", "global optimizer jutro"}:
-        try:
-            from app.b2c.v41_brain import global_day_optimizer
-            return _as_reply("v41_global_optimizer_tomorrow", global_day_optimizer(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=1, buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("v41_global_optimizer_tomorrow", "Nie mogę teraz przeanalizować planu jutra.")
-
-    if low in {"optymalizuj jutro automatycznie", "napraw plan jutra globalnie", "apply global optimizer jutro"}:
-        try:
-            from app.b2c.v41_brain import apply_global_optimization
-            return _as_reply("v41_apply_global_optimizer_tomorrow", apply_global_optimization(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=1, buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("v41_apply_global_optimizer_tomorrow", "Nie mogę teraz automatycznie zoptymalizować jutra.")
-
-    if low in {"optymalizuj dzień automatycznie", "optymalizuj dzien automatycznie", "napraw plan dnia globalnie"}:
-        try:
-            from app.b2c.v41_brain import apply_global_optimization
-            return _as_reply("v41_apply_global_optimizer", apply_global_optimization(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=0, buffer_min=TRAVEL_BUFFER_MIN))
-        except Exception:
-            return _as_reply("v41_apply_global_optimizer", "Nie mogę teraz automatycznie zoptymalizować dnia.")
-
-    # =============================
-    # AI DAY REBUILDER v42
-    # =============================
-    if low in {"ai day rebuilder", "przebuduj dzień", "przebuduj dzien", "day rebuilder"}:
-        try:
-            from app.b2c.v42_brain import global_day_rebuilder
-            return _as_reply("v42_day_rebuilder", global_day_rebuilder(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=0))
-        except Exception:
-            return _as_reply("v42_day_rebuilder", "Nie mogę teraz przebudować dnia.")
-
-    if low in {"ai day rebuilder jutro", "przebuduj jutro", "day rebuilder jutro"}:
-        try:
-            from app.b2c.v42_brain import global_day_rebuilder
-            return _as_reply("v42_day_rebuilder_tomorrow", global_day_rebuilder(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=1))
-        except Exception:
-            return _as_reply("v42_day_rebuilder_tomorrow", "Nie mogę teraz przebudować jutra.")
-
-    if low in {"przebuduj jutro automatycznie", "apply day rebuild jutro", "ai rebuild jutra"}:
-        try:
-            from app.b2c.v42_brain import apply_day_rebuild
-            return _as_reply("v42_apply_day_rebuild_tomorrow", apply_day_rebuild(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=1))
-        except Exception:
-            return _as_reply("v42_apply_day_rebuild_tomorrow", "Nie mogę teraz automatycznie przebudować jutra.")
-
-    if low in {"przebuduj dzień automatycznie", "przebuduj dzien automatycznie", "apply day rebuild"}:
-        try:
-            from app.b2c.v42_brain import apply_day_rebuild
-            return _as_reply("v42_apply_day_rebuild", apply_day_rebuild(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=0))
-        except Exception:
-            return _as_reply("v42_apply_day_rebuild", "Nie mogę teraz automatycznie przebudować dnia.")
-
-    # =============================
-    # SMART TIME BLOCKS v43
-    # =============================
-    if low in {"smart time blocks", "bloki czasu", "time blocks", "smart blocks"}:
-        try:
-            from app.b2c.v43_brain import smart_time_blocks
-            return _as_reply("v43_time_blocks", smart_time_blocks(tasks_mod, day_offset=0))
-        except Exception:
-            return _as_reply("v43_time_blocks", "Nie mogę teraz zbudować bloków czasu.")
-
-    if low in {"smart time blocks jutro", "bloki jutra", "time blocks jutro", "smart blocks jutro"}:
-        try:
-            from app.b2c.v43_brain import smart_time_blocks
-            return _as_reply("v43_time_blocks_tomorrow", smart_time_blocks(tasks_mod, day_offset=1))
-        except Exception:
-            return _as_reply("v43_time_blocks_tomorrow", "Nie mogę teraz zbudować bloków jutra.")
-
-    # =============================
-    # AUTONOMOUS DAY MANAGER v44
-    # =============================
-    if low in {"autonomous day manager", "zaplanuj dzień", "zaplanuj dzien", "zaplanuj dziś", "zaplanuj dzis"}:
-        try:
-            from app.b2c.v44_brain import autonomous_day_manager
-            return _as_reply("v44_day_manager", autonomous_day_manager(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=0))
-        except Exception:
-            return _as_reply("v44_day_manager", "Nie mogę teraz autonomicznie zaplanować dnia.")
-
-    if low in {"autonomous day manager jutro", "zaplanuj jutro", "autonomous manager jutro"}:
-        try:
-            from app.b2c.v44_brain import autonomous_day_manager
-            return _as_reply("v44_day_manager_tomorrow", autonomous_day_manager(tasks_mod, _get_origin_address(), _get_place("travel_mode_default") or "samochod", day_offset=1))
-        except Exception:
-            return _as_reply("v44_day_manager_tomorrow", "Nie mogę teraz autonomicznie zaplanować jutra.")
-
-    # =============================
-    # CONTEXTUAL PRIORITIES v45
-    # =============================
-    if low in {"contextual priorities", "priorytety kontekstowe", "priorytety dnia", "context priorities"}:
-        try:
-            from app.b2c.v45_brain import contextual_priorities
-            return _as_reply("v45_contextual_priorities", contextual_priorities(tasks_mod, day_offset=0))
-        except Exception:
-            return _as_reply("v45_contextual_priorities", "Nie mogę teraz policzyć priorytetów kontekstowych.")
-
-    if low in {"contextual priorities jutro", "priorytety jutra", "context priorities jutro"}:
-        try:
-            from app.b2c.v45_brain import contextual_priorities
-            return _as_reply("v45_contextual_priorities_tomorrow", contextual_priorities(tasks_mod, day_offset=1))
-        except Exception:
-            return _as_reply("v45_contextual_priorities_tomorrow", "Nie mogę teraz policzyć priorytetów jutra.")
-
     return _as_reply("unknown", "Nie mam jeszcze tej komendy. Spróbuj: `lista`, `dodaj: ...`, `usuń ...`, `priorytet ...`.")
