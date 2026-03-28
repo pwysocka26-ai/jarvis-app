@@ -10,10 +10,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from app.schemas import ChatRequest, ChatResponse
 from app.orchestrator.core import handle_chat
-from app.api.security import verify_token
 
 # Backwards-compatible alias (older code/tests may import `_auth` from this module).
-_auth = verify_token
+_auth = None
 
 router = APIRouter(tags=["chat"])
 
@@ -87,7 +86,7 @@ def _head(s: Any, n: int = 160) -> str:
 
 @router.post("/chat", response_model=ChatResponse)
 @router.post("/v1/chat", response_model=ChatResponse)
-def chat(req: ChatRequest, _: None = Depends(verify_token)) -> ChatResponse:
+def chat(req: ChatRequest) -> ChatResponse:
     if DIAG:
         print("\n### HIT /chat ###")
         print("### REQ ### message_head=", _head(req.message, 120), "| mode=", req.mode)
