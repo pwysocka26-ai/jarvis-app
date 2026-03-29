@@ -68,8 +68,6 @@ const copy = {
   navSettings: 'Ustawienia',
 };
 
-const OLLAMA_MODEL = 'llama3.2';
-
 function Header({
   title,
   icon,
@@ -383,67 +381,68 @@ function ChatScreen() {
   }, [messages, isSending]);
 
   async function sendMessage() {
-    const trimmed = message.trim();
-    if (!trimmed || isSending) return;
+  const trimmed = message.trim();
+  if (!trimmed || isSending) return;
 
-    const userMessage: ChatMessage = {
-      id: `u-${Date.now()}`,
-      role: 'user',
-      text: trimmed,
-    };
+  const userMessage: ChatMessage = {
+    id: `u-${Date.now()}`,
+    role: 'user',
+    text: trimmed,
+  };
 
-    const nextMessages = [...messages, userMessage];
-    setMessages(nextMessages);
-    setMessage('');
-    setIsSending(true);
+  const nextMessages = [...messages, userMessage];
+  setMessages(nextMessages);
+  setMessage('');
+  setIsSending(true);
 
-    try {
-      const response = await fetch('http://127.0.0.1:11434/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: OLLAMA_MODEL,
-          stream: false,
-          messages: nextMessages
-            .filter((m) => m.role !== 'system')
-            .map((m) => ({
-              role: m.role,
-              content: m.text,
-            })),
-        }),
-      });
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: trimmed,
+        mode: 'chat',
+      }),
+    });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+    const data = await response.json();
 
-      const data = await response.json();
-      const assistantText =
-        data?.message?.content?.trim() ||
-        'Nie udało się pobrać odpowiedzi z Ollamy.';
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `a-${Date.now()}`,
-          role: 'assistant',
-          text: assistantText,
-        },
-      ]);
-    } catch (error) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `e-${Date.now()}`,
-          role: 'assistant',
-          text: 'Nie mogę połączyć się z Ollamą. Upewnij się, że Ollama działa lokalnie i masz model ' + OLLAMA_MODEL + '.',
-        },
-      ]);
-    } finally {
-      setIsSending(false);
-      inputRef.current?.focus();
+    if (!response.ok) {
+      throw new Error(data?.detail || data?.reply || 'Błąd backendu Jarvisa');
     }
+
+    const replyText =
+      data?.reply ||
+      data?.meta?.response ||
+      'Jarvis nie zwrócił odpowiedzi.';
+
+    setMessages([
+      ...nextMessages,
+      {
+        id: `a-${Date.now()}`,
+        role: 'assistant',
+        text: replyText,
+      },
+    ]);
+  } catch (error) {
+    const errorText =
+      error instanceof Error
+        ? error.message
+        : 'Nie mogę połączyć się z backendem Jarvisa.';
+
+    setMessages([
+      ...nextMessages,
+      {
+        id: `e-${Date.now()}`,
+        role: 'assistant',
+        text: errorText,
+      },
+    ]);
+  } finally {
+    setIsSending(false);
+    inputRef.current?.focus();
   }
+}
 
   return (
     <div className="flex h-full flex-col">
@@ -781,7 +780,7 @@ function SettingsScreen() {
                     🦙
                   </div>
                   <div>
-                    <div className="text-[18px] font-semibold text-slate-800">Ollama</div>
+                    <div className="text-[18px] font-semibold text-slate-800">Jarvis</div>
                     <div className="mt-2 max-w-[250px] text-[16px] leading-7 text-slate-500">
                       Sprawdź status Ollamy i skonfiguruj środowisko sztucznej inteligencji
                     </div>
@@ -841,3 +840,5 @@ export default function App() {
     </PhoneShell>
   );
 }
+
+
