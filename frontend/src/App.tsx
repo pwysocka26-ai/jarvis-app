@@ -402,6 +402,9 @@ function ChatScreen() {
       body: JSON.stringify({
         message: trimmed,
         mode: 'chat',
+          history: nextMessages
+          .filter((m) => m.role !== 'system')
+          .map((m) => ({ role: m.role, text: m.text })),
       }),
     });
 

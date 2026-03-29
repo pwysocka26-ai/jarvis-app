@@ -91,30 +91,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         print("\n### HIT /chat ###")
         print("### REQ ### message_head=", _head(req.message, 120), "| mode=", req.mode)
 
-    global _LAST_CHAT_TASK_ID
-    user_text = req.message.strip()
-    low = user_text.lower()
-    normalized = user_text
-
-    if low.startswith("muszę "):
-        normalized = "dodaj: " + user_text[6:]
-    elif low.startswith("musze "):
-        normalized = "dodaj: " + user_text[6:]
-    elif low.startswith("kupić "):
-        normalized = "dodaj: " + user_text[6:]
-    elif low.startswith("kupic "):
-        normalized = "dodaj: " + user_text[6:]
-
-    elif "pokaż" in low or "pokaz" in low or "lista" in low:
-        normalized = "lista"
-
-    elif _LAST_CHAT_TASK_ID and "ważne" in low:
-        normalized = f"priorytet {_LAST_CHAT_TASK_ID} p2"
-
-    elif _LAST_CHAT_TASK_ID and "ostatnie" in low:
-        normalized = f"usuń {_LAST_CHAT_TASK_ID}"
-
-    out = handle_chat(normalized, mode=req.mode)
+    out = handle_chat(req.message, mode=req.mode)
 
     if DIAG:
         try:
@@ -134,12 +111,7 @@ def chat(req: ChatRequest) -> ChatResponse:
     if TRACE_RAISE:
         raise RuntimeError("TRACE ME")
 
-    reply = out.get("reply", "")
-    import re
-    if isinstance(reply, str):
-        m = re.search(r"#(\d+)", reply)
-        if m:
-            _LAST_CHAT_TASK_ID = int(m.group(1)) if isinstance(out, dict) else ""
+    reply = out.get("reply", "") if isinstance(out, dict) else ""
     intent = out.get("intent") if isinstance(out, dict) else None
     meta = {k: v for k, v in out.items() if k not in ("reply", "intent")} if isinstance(out, dict) else {}
 
