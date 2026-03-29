@@ -114,6 +114,25 @@ def chat(req: ChatRequest) -> ChatResponse:
     elif _LAST_CHAT_TASK_ID and "ostatnie" in low:
         normalized = f"usuń {_LAST_CHAT_TASK_ID}"
 
+    
+
+    # === NLP DATE PATCH ===
+    import datetime
+
+    today = datetime.date.today()
+
+    if "jutro" in low:
+        date = today + datetime.timedelta(days=1)
+        normalized = normalized + f" {date.isoformat()}"
+
+    elif "pojutrze" in low:
+        date = today + datetime.timedelta(days=2)
+        normalized = normalized + f" {date.isoformat()}"
+
+    elif "dziś" in low or "dzis" in low:
+        normalized = normalized + f" {today.isoformat()}"
+
+
     out = handle_chat(normalized, mode=req.mode)
 
     if DIAG:
