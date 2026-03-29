@@ -185,8 +185,19 @@ def _normalize_message(user_text: str) -> tuple[str, str]:
         "pokaz liste",
         "pokaż listę zadań",
         "pokaz liste zadan",
+        "co mam dziś",
+        "co mam dzis",
+        "co mam dzisiaj",
     }:
         normalized = "lista"
+    elif low in {
+        "co mam jutro",
+        "co mam na jutro",
+        "jakie mam zadania jutro",
+        "pokaż co mam jutro",
+        "pokaz co mam jutro",
+    }:
+        normalized = "lista jutro"
 
     return low, normalized
 
